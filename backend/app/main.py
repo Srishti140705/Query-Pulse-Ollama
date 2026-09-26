@@ -1,4 +1,4 @@
-﻿from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.cors import CORSMiddleware
 from app.database import close_connection, get_connection, get_sqlalchemy_engine
 from app.models import Base, User, UserQuery
 from app.api.parser import SQLParser
@@ -111,7 +111,7 @@ def send_email(recipient: str, subject: str, body: str) -> None:
     message["From"] = sender
     message["To"] = recipient
     message.set_content(body)
-    port = int(os.getenv("SMTP_PORT", "587"))
+    port = int((os.getenv("SMTP_PORT") or "587"))
     use_tls = os.getenv("SMTP_USE_TLS", "true").lower() in {"1", "true", "yes"}
     with smtplib.SMTP(host, port, timeout=15) as smtp:
         if use_tls:
@@ -122,7 +122,7 @@ def send_email(recipient: str, subject: str, body: str) -> None:
 
 def frontend_url(path: str) -> str:
     default = "https://" + os.environ["VERCEL_PROJECT_PRODUCTION_URL"] if os.getenv("VERCEL_PROJECT_PRODUCTION_URL") else "http://localhost:3000"
-    return os.getenv("FRONTEND_URL", default).rstrip("/") + path
+    return (os.getenv("FRONTEND_URL") or default).rstrip("/") + path
 
 
 app.add_middleware(
@@ -297,7 +297,7 @@ def login_user(request: LoginRequest):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
         if require_verification() and not user.email_verified:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Please verify your email before signing in")
-        access_token = jwt.encode({"sub": str(user.id), "exp": datetime.now(timezone.utc) + timedelta(minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")))}, jwt_secret(), algorithm="HS256")
+        access_token = jwt.encode({"sub": str(user.id), "exp": datetime.now(timezone.utc) + timedelta(minutes=int((os.getenv("JWT_EXPIRE_MINUTES") or "60")))}, jwt_secret(), algorithm="HS256")
         return {"access_token": access_token, "token_type": "bearer", "user": public_user(user)}
 
 

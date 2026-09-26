@@ -16,6 +16,7 @@ os.environ['JWT_SECRET_KEY'] = 'test-only-long-jwt-secret-not-for-production'
 os.environ['CONNECTION_ENCRYPTION_KEY'] = Fernet.generate_key().decode()
 os.environ['REQUIRE_EMAIL_VERIFICATION'] = 'false'
 os.environ['SMTP_HOST'] = ''
+os.environ['JWT_EXPIRE_MINUTES'] = ''
 from fastapi.testclient import TestClient
 from api.index import app
 from app.database import get_sqlalchemy_engine
