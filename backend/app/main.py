@@ -30,6 +30,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
 app = FastAPI()
+
+
+def smtp_configured():
+    return all(os.getenv(key) for key in ('SMTP_HOST', 'SMTP_USERNAME', 'SMTP_PASSWORD', 'SMTP_FROM'))
+
+
+def require_verification():
+    return os.getenv('REQUIRE_EMAIL_VERIFICATION', 'false').lower() in {'1', 'true', 'yes'}
+
 security = HTTPBearer(auto_error=False)
 
 
@@ -67,19 +76,22 @@ app.include_router(workspace_router)
 
 
 def ensure_user_columns(engine) -> None:
+    Base.metadata.create_all(engine)
     existing_columns = {column["name"] for column in inspect(engine).get_columns("app_users")}
+    boolean_type = "BOOLEAN" if engine.dialect.name == "postgresql" else "BOOLEAN"
+    datetime_type = "TIMESTAMP" if engine.dialect.name == "postgresql" else "DATETIME"
     with engine.begin() as connection:
         # Mark legacy accounts as verified when this new column is introduced.
         if "email_verified" not in existing_columns:
-            connection.execute(text("ALTER TABLE app_users ADD COLUMN email_verified TINYINT(1) NOT NULL DEFAULT 1"))
+            connection.execute(text(f"ALTER TABLE app_users ADD COLUMN email_verified {boolean_type} NOT NULL DEFAULT TRUE"))
         if "email_verification_token_hash" not in existing_columns:
             connection.execute(text("ALTER TABLE app_users ADD COLUMN email_verification_token_hash VARCHAR(64) NULL UNIQUE"))
         if "email_verification_expires_at" not in existing_columns:
-            connection.execute(text("ALTER TABLE app_users ADD COLUMN email_verification_expires_at DATETIME NULL"))
+            connection.execute(text(f"ALTER TABLE app_users ADD COLUMN email_verification_expires_at {datetime_type} NULL"))
         if "reset_token_hash" not in existing_columns:
             connection.execute(text("ALTER TABLE app_users ADD COLUMN reset_token_hash VARCHAR(64) NULL UNIQUE"))
         if "reset_token_expires_at" not in existing_columns:
-            connection.execute(text("ALTER TABLE app_users ADD COLUMN reset_token_expires_at DATETIME NULL"))
+            connection.execute(text(f"ALTER TABLE app_users ADD COLUMN reset_token_expires_at {datetime_type} NULL"))
 
 
 def token_hash(token: str) -> str:
@@ -109,7 +121,8 @@ def send_email(recipient: str, subject: str, body: str) -> None:
 
 
 def frontend_url(path: str) -> str:
-    return os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/") + path
+    default = "https://" + os.environ["VERCEL_PROJECT_PRODUCTION_URL"] if os.getenv("VERCEL_PROJECT_PRODUCTION_URL") else "http://localhost:3000"
+    return os.getenv("FRONTEND_URL", default).rstrip("/") + path
 
 
 app.add_middleware(
@@ -123,6 +136,18 @@ app.add_middleware(
 
 class QueryRequest(BaseModel):
     query: str
+
+    @field_validator('query')
+    @classmethod
+    def validate_query(cls, value):
+        from sqlglot.tokens import Tokenizer, TokenType
+        if not value.strip() or len(value) > 100000:
+            raise ValueError('Enter one SQL statement of at most 100,000 characters.')
+        tokens = Tokenizer().tokenize(value)
+        if any(token.token_type == TokenType.SEMICOLON for token in tokens[:-1]):
+            raise ValueError('Run exactly one SQL statement at a time.')
+        return value
+
     database: Literal['mysql', 'postgresql', 'sqlite', 'mariadb'] = 'mysql'
 
 
@@ -152,8 +177,8 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str) -> str:
-        if len(value) < 8:
-            raise ValueError("Password must be at least 8 characters long")
+        if len(value) < 8 or len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must contain at least 8 characters and at most 72 UTF-8 bytes")
         return value
 
 
@@ -173,8 +198,8 @@ class ResetPasswordRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str) -> str:
-        if len(value) < 8:
-            raise ValueError("Password must be at least 8 characters long")
+        if len(value) < 8 or len(value.encode("utf-8")) > 72:
+            raise ValueError("Password must contain at least 8 characters and at most 72 UTF-8 bytes")
         return value
 
 
@@ -196,13 +221,15 @@ class ProfileUpdateRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def validate_password(cls, value: str | None) -> str | None:
-        if value is not None and len(value) < 8:
-            raise ValueError("Password must be at least 8 characters long")
+        if value is not None and (len(value) < 8 or len(value.encode("utf-8")) > 72):
+            raise ValueError("Password must contain at least 8 characters and at most 72 UTF-8 bytes")
         return value
 
 
 @app.post("/register", status_code=status.HTTP_201_CREATED)
 def register_user(request: RegisterRequest):
+    if require_verification() and not smtp_configured():
+        raise HTTPException(503, "Email verification is required, but the email service is not configured.")
     engine = get_sqlalchemy_engine()
     Base.metadata.create_all(engine)
     ensure_user_columns(engine)
@@ -228,11 +255,19 @@ def register_user(request: RegisterRequest):
             session.rollback()
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username or email is already registered")
         session.refresh(user)
-        try:
-            send_email(user.email, "Verify your QueryPulse email", f"Verify your account by opening this link:\n\n{os.getenv('BACKEND_URL', 'http://localhost:8000').rstrip('/') + '/verify-email?token=' + verification_token}\n\nThis link expires in 24 hours.")
-        except RuntimeError as exc:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
-        return {"message": "Account created. Check your email to verify it before signing in.", "user": public_user(user)}
+        message = "Account created. You can now sign in."
+        if smtp_configured():
+            try:
+                send_email(user.email, "Verify your QueryPulse email", f"Verify your account: {os.getenv('BACKEND_URL', frontend_url('/api') if os.getenv('VERCEL') else 'http://localhost:8000').rstrip('/')}/verify-email?token={verification_token}")
+                message = "Account created. Check your email to verify it before signing in." if require_verification() else "Account created. You can sign in now; a verification email has also been sent."
+            except (RuntimeError, OSError, smtplib.SMTPException):
+                if require_verification():
+                    session.delete(user)
+                    session.commit()
+                    raise HTTPException(503, "Verification email could not be sent. Please try registering again later.")
+                message = "Account created. You can sign in now. Verification email could not be sent."
+        return {"message": message, "user": public_user(user)}
+
 
 
 @app.get("/verify-email")
@@ -255,11 +290,12 @@ def verify_email(token: str = ""):
 @app.post("/login")
 def login_user(request: LoginRequest):
     engine = get_sqlalchemy_engine()
+    ensure_user_columns(engine)
     with Session(engine) as session:
         user = session.scalar(select(User).where(User.email == request.email.strip().lower()))
-        if user is None or not bcrypt.checkpw(request.password.encode("utf-8"), user.password_hash.encode("utf-8")):
+        if len(request.password.encode("utf-8")) > 72 or user is None or not bcrypt.checkpw(request.password.encode("utf-8"), user.password_hash.encode("utf-8")):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password")
-        if not user.email_verified:
+        if require_verification() and not user.email_verified:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Please verify your email before signing in")
         access_token = jwt.encode({"sub": str(user.id), "exp": datetime.now(timezone.utc) + timedelta(minutes=int(os.getenv("JWT_EXPIRE_MINUTES", "60")))}, jwt_secret(), algorithm="HS256")
         return {"access_token": access_token, "token_type": "bearer", "user": public_user(user)}
@@ -290,7 +326,7 @@ def update_profile(request: ProfileUpdateRequest, current_user: dict = Depends(g
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username is already registered")
             user.username = request.username
         if request.password:
-            if not request.current_password or not bcrypt.checkpw(request.current_password.encode("utf-8"), user.password_hash.encode("utf-8")):
+            if not request.current_password or len(request.current_password.encode("utf-8")) > 72 or not bcrypt.checkpw(request.current_password.encode("utf-8"), user.password_hash.encode("utf-8")):
                 raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Your current password is incorrect")
             user.password_hash = bcrypt.hashpw(request.password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         session.commit()
@@ -300,6 +336,8 @@ def update_profile(request: ProfileUpdateRequest, current_user: dict = Depends(g
 
 @app.post("/forgot-password")
 def forgot_password(request: ForgotPasswordRequest):
+    if not smtp_configured():
+        raise HTTPException(503, "Password recovery email is not configured. Contact the site administrator.")
     engine = get_sqlalchemy_engine()
     Base.metadata.create_all(engine)
     ensure_user_columns(engine)
@@ -312,7 +350,7 @@ def forgot_password(request: ForgotPasswordRequest):
             session.commit()
             try:
                 send_email(user.email, "Reset your QueryPulse password", f"Reset your password by opening this link:\n\n{frontend_url('/reset-password?token=' + reset_token)}\n\nThis link expires in one hour.")
-            except RuntimeError as exc:
+            except (RuntimeError, OSError, smtplib.SMTPException) as exc:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc))
     return {"message": "If an account exists for that email, password reset instructions have been sent."}
 
@@ -336,7 +374,7 @@ def reset_password(request: ResetPasswordRequest):
 @app.post("/query")
 def execute_query(request: QueryRequest, current_user: dict = Depends(get_current_user)):
     parser = SQLParser()
-    executor = QueryExecutor(request.database)
+    executor = QueryExecutor(request.database, owner_id=int(current_user["sub"]))
     try:
         parsed = parser.parse(request.query, dialect=request.database)
     except Exception as exc:
@@ -403,8 +441,10 @@ def execute_query(request: QueryRequest, current_user: dict = Depends(get_curren
         except Exception:
             result["history_warning"] = "The query ran, but its performance record could not be saved."
         return {"query": request.query, "parsed": parsed, "result": result}
+    except HTTPException:
+        raise
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(400, str(e))
 
 
 @app.post("/execution-plan")
@@ -419,7 +459,7 @@ def execution_plan(request: QueryRequest, current_user: dict = Depends(get_curre
         parsed.update({"tables": [], "columns": [], "where_conditions": [], "joins": [], "group_by": [], "order_by": [], "limit": None, "aliases": {}})
 
     if parsed.get("supports_native_explain"):
-        plan = QueryExecutor(request.database).explain_query(request.query.rstrip().rstrip(";"))
+        plan = QueryExecutor(request.database, owner_id=int(current_user["sub"])).explain_query(request.query.rstrip().rstrip(";"))
     else:
         plan = operation_plan(parsed)
     if plan.get("error"):

@@ -29,6 +29,7 @@ from urllib.parse import quote_plus
 
 import mysql.connector
 from sqlalchemy import create_engine
+from functools import lru_cache
 from mysql.connector import Error as MySQLError
 
 
@@ -128,11 +129,14 @@ def close_connection(connection: Optional[mysql.connector.connection.MySQLConnec
         raise RuntimeError(f"Error closing MySQL connection: {exc}") from exc
 
 
+@lru_cache(maxsize=1)
 def get_sqlalchemy_engine():
     """Return a SQLAlchemy engine using DATABASE_URL or legacy MySQL settings."""
     database_url = os.getenv("DATABASE_URL")
     if database_url:
-        return create_engine(database_url, pool_pre_ping=True)
+        if database_url.startswith(('postgres://', 'postgresql://')):
+            database_url = 'postgresql+psycopg://' + database_url.split('://', 1)[1]
+        return create_engine(database_url, pool_pre_ping=True, pool_size=2, max_overflow=3)
 
     host = _get_env_var("MYSQL_HOST")
     user = _get_env_var("MYSQL_USER")

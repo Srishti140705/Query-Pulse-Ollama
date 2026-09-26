@@ -1,10 +1,9 @@
-﻿import React from 'react'
+﻿import React, { lazy, Suspense } from 'react'
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useAuth } from './auth/AuthProvider'
 import Navbar from './components/Navbar'
 import AuthenticatedLayout from './components/AuthenticatedLayout'
-import QueryEditor from './pages/QueryEditor'
-import QuestWorkspace from './pages/QuestWorkspace'
+const QuestWorkspace = lazy(() => import('./pages/QuestWorkspace'))
 import History from './pages/History'
 import About from './pages/About'
 import Profile from './pages/Profile'
@@ -26,7 +25,7 @@ export default function App() {
       <Routes>
         <Route
           path="/"
-          element={<Login />}
+          element={<GuestRoute><Login /></GuestRoute>}
         />
         <Route path="/about" element={<About />} />
         <Route
@@ -69,11 +68,12 @@ export default function App() {
           }
         >
           <Route path="/dashboard" element={<Navigate to="/editor" replace />} />
-          <Route path="/editor" element={<QuestWorkspace />} />
+          <Route path="/editor" element={<Suspense fallback={<p className="p-8">Loading workspace…</p>}><QuestWorkspace /></Suspense>} />
           <Route path="/history" element={<History />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/connections" element={<DatabaseConnections />} />
         </Route>
+        <Route path="*" element={<Navigate to={isAuthenticated ? "/editor" : "/login"} replace />} />
       </Routes>
     </div>
   )

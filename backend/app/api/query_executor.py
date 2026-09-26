@@ -11,8 +11,19 @@ from app.database import get_connection, close_connection
 class QueryExecutor:
     """Execute one MySQL statement and return a consistent JSON result."""
 
-    def __init__(self, database: str = 'mysql') -> None:
+    def __init__(self, database: str = 'mysql', owner_id: int | None = None) -> None:
         self.database = database
+        self.owner_id = owner_id
+
+    def connection(self):
+        if self.owner_id is None:
+            raise ValueError('A signed-in account and active connection are required.')
+        from sqlalchemy.orm import Session
+        from app.database import get_sqlalchemy_engine
+        from app.api.connections import active_connection, open_connection
+        with Session(get_sqlalchemy_engine()) as session:
+            saved = active_connection(session, self.owner_id)
+            return open_connection(saved)
 
     def execute(self, query: str, statement: Dict[str, Any], params: Optional[tuple] = None) -> Dict[str, Any]:
         """Execute a SELECT, metadata command, DML, DDL, or administrative statement."""
@@ -24,11 +35,16 @@ class QueryExecutor:
         query_type = statement.get("query_type") or "SQL"
         started_at = perf_counter()
         try:
-            conn = get_connection()
+            conn = self.connection()
             cursor = conn.cursor(dictionary=True)
             cursor.execute(query, params or ())
 
-            rows = cursor.fetchall() if cursor.with_rows else []
+            rows = cursor.fetchmany(1001) if cursor.with_rows else []
+            truncated = len(rows) > 1000
+            rows = rows[:1000]
+            if cursor.with_rows:
+                while cursor.fetchmany(1000):
+                    pass
             affected = cursor.rowcount if isinstance(cursor.rowcount, int) and cursor.rowcount > 0 else 0
             last_id = getattr(cursor, "lastrowid", None)
 
@@ -48,6 +64,7 @@ class QueryExecutor:
 
             return {
                 "rows": rows,
+                "truncated": truncated,
                 "row_count": len(rows) if rows else affected,
                 "affected_rows": affected,
                 "last_row_id": last_id,
@@ -99,7 +116,7 @@ class QueryExecutor:
         conn = None
         cursor = None
         try:
-            conn = get_connection()
+            conn = self.connection()
             cursor = conn.cursor(dictionary=True)
             cursor.execute(query, params or ())
             rows = cursor.fetchall()
@@ -130,7 +147,7 @@ class QueryExecutor:
         conn = None
         cursor = None
         try:
-            conn = get_connection()
+            conn = self.connection()
             cursor = conn.cursor(dictionary=True)
             cursor.execute(f"EXPLAIN {query}")
             steps = cursor.fetchall()
@@ -191,7 +208,7 @@ class QueryExecutor:
         conn = None
         cursor = None
         try:
-            conn = get_connection()
+            conn = self.connection()
             cursor = conn.cursor()
             cursor.execute(query, params or ())
             affected = cursor.rowcount

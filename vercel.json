@@ -7,5 +7,15 @@
     "api/index.py": {
       "excludeFiles": "{frontend/**,node_modules/**,tests/**,datasets/**,database/**,docker/**,docs/**}"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "/api"
+    },
+    {
+      "source": "/((?!api(?:/|$)).*)",
+      "destination": "/index.html"
+    }
+  ]
 }

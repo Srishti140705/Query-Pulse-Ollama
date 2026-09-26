@@ -9,7 +9,7 @@ from pydantic import ValidationError
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import app.main
-from app.api.connections import ConnectionInput, ConnectionUpdate, test_unsaved_connection
+from app.api.connections import ConnectionInput, ConnectionUpdate, test_unsaved_connection as check_unsaved_connection
 
 
 class FakeConnection:
@@ -60,7 +60,7 @@ class ConnectionValidationTests(unittest.TestCase):
         connect.return_value = fake
         request = ConnectionInput(**self.valid_payload())
 
-        result = test_unsaved_connection(request, {"sub": "1"})
+        result = check_unsaved_connection(request, {"sub": "1"})
 
         self.assertEqual(result, {"message": "Connection successful"})
         connect.assert_called_once_with(
@@ -79,7 +79,7 @@ class ConnectionValidationTests(unittest.TestCase):
         request = ConnectionInput(**self.valid_payload())
 
         with self.assertRaises(HTTPException) as context:
-            test_unsaved_connection(request, {"sub": "1"})
+            check_unsaved_connection(request, {"sub": "1"})
 
         self.assertEqual(context.exception.status_code, 400)
         self.assertEqual(context.exception.detail, "Unable to connect using these database details")

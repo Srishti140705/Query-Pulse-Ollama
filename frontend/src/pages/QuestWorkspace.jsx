@@ -1,10 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '../auth/AuthProvider'
-import Editor from '@monaco-editor/react'
+import Editor, { loader } from '@monaco-editor/react'
+import * as monaco from 'monaco-editor/esm/vs/editor/editor.api'
+import 'monaco-editor/esm/vs/editor/editor.all'
+import 'monaco-editor/esm/vs/basic-languages/sql/sql.contribution'
+import EditorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker'
+import { format } from 'sql-formatter'
+self.MonacoEnvironment = { getWorker: () => new EditorWorker() }
+loader.config({ monaco })
 import { BarChart, Bar, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 import { analyzeQuery, executeQuery, getExecutionPlan } from '../services/queryService'
-import { convertSql, debugSql, explainSql, optimizeSql } from '../services/aiService'
+import { listConnections } from '../services/connectionService'
 import { listWorkspaceQueries } from '../services/workspaceService'
 
 const starterSql = `SELECT
@@ -15,27 +22,6 @@ GROUP BY department
 HAVING AVG(salary) > 50000
 ORDER BY avg_salary DESC;`
 
-const rows = [
-  { department: 'IT', avg_salary: '79,666.67' },
-  { department: 'Finance', avg_salary: '70,000.00' },
-  { department: 'Marketing', avg_salary: '53,000.00' },
-]
-
-const historySeed = [
-  ['SELECT department, AVG(salary) AS...', '3 rows', '2m ago', true, starterSql],
-  ['SELECT * FROM employees LIMIT 10;', '10 rows', '10m ago', true, 'SELECT * FROM employees LIMIT 10;'],
-  ['SELECT name FROM employees;', 'Error', '15m ago', false, 'SELECT name FROM employees;'],
-  ['SHOW TABLES;', '5 rows', '1h ago', true, 'SHOW TABLES;'],
-]
-
-const thinkingMessages = [
-  'Parsing the SQL and selected dialect...',
-  'Checking syntax, schema objects, and query logic...',
-  'Reviewing safety and performance trade-offs...',
-  'Writing a grounded answer...',
-]
-
-const toItems = (value) => Array.isArray(value) ? value.filter(Boolean).map(String) : value ? [String(value)] : []
 const formatDuration = (milliseconds) => milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(2)} s` : `${milliseconds} ms`
 const speedTone = (milliseconds) => milliseconds > 1000 ? 'slow' : milliseconds >= 200 ? 'moderate' : 'fast'
 
@@ -53,114 +39,24 @@ function SlowQueryTooltip({ active, payload }) {
   )
 }
 
-function formatAiAnswer(mode, data) {
-  const providerNote = data.provider_available === false
-    ? [`The local AI provider was unavailable, so this answer uses QueryPulse's deterministic SQL checks. ${data.provider_warning || ''}`.trim()]
-    : []
-
-  if (mode === 'debug') {
-    const issues = toItems(data.issues?.map((issue) => `${String(issue.severity || 'issue').toUpperCase()}: ${issue.message}`))
-    const recognized = data.statement_type ? [`Statement recognized as ${data.statement_type} (${data.category || 'SQL'})`] : []
-    return {
-      tone: data.has_issues ? 'warning' : 'success',
-      title: data.has_issues ? 'Issues found' : 'No issues found',
-      summary: [data.problem, data.explanation].filter(Boolean).join(' '),
-      sections: [
-        { title: 'What I checked', items: issues.length ? [...recognized, ...issues] : [...recognized, 'Syntax is valid', 'Referenced schema objects are available where applicable', 'No obvious logic or safety issue was detected'] },
-        { title: 'Suggestions', items: toItems(data.suggestions) },
-        { title: 'Provider note', items: providerNote },
-      ],
-      sql: data.corrected_sql && data.has_issues ? data.corrected_sql : '',
-      sqlLabel: 'Suggested correction',
-    }
-  }
-
-  if (mode === 'optimize') {
-    const blockingIssues = toItems(data.deterministic_review?.issues?.filter((issue) => issue.severity === 'error').map((issue) => issue.message))
-    return {
-      tone: blockingIssues.length ? 'warning' : data.can_optimize ? 'info' : 'success',
-      title: blockingIssues.length ? 'Fix query issues before optimizing' : data.can_optimize ? 'Optimization opportunities found' : 'Already in good shape',
-      summary: [data.summary, data.note].filter(Boolean).join(' '),
-      sections: [
-        { title: 'Blocking issues', items: blockingIssues },
-        { title: 'Recommended changes', items: toItems(data.changes) },
-        { title: 'Safety notes', items: toItems(data.safety_warnings) },
-        { title: 'Provider note', items: providerNote },
-      ],
-      sql: data.can_optimize && data.optimized_sql ? data.optimized_sql : '',
-      sqlLabel: 'Optimized SQL',
-    }
-  }
-
-  if (mode === 'convert') {
-    return {
-      tone: 'info',
-      title: 'PostgreSQL conversion',
-      summary: data.explanation || 'The query was converted from MySQL to PostgreSQL.',
-      sections: [
-        { title: 'Review before running', items: [...toItems(data.safety_warnings), ...providerNote] },
-      ],
-      sql: data.converted_sql || '',
-      sqlLabel: 'Converted SQL',
-    }
-  }
-
-  const issueItems = toItems(data.issues?.map((issue) => `${String(issue.severity || 'issue').toUpperCase()}: ${issue.message}`))
-  return {
-    tone: issueItems.length ? 'warning' : 'info',
-    title: issueItems.length ? 'Query explained — review these issues' : 'Query explained',
-    summary: data.explanation || 'The query was analyzed.',
-    sections: [
-      { title: 'Operation', items: data.statement_type ? [`${data.statement_type} (${data.category || 'SQL'})`] : [] },
-      { title: 'Tables', items: toItems(data.tables) },
-      { title: 'Joins', items: toItems(data.joins) },
-      { title: 'Filters', items: toItems(data.filters) },
-      { title: 'Result', items: toItems(data.likely_result) },
-      { title: 'Issues', items: issueItems },
-      { title: 'Provider note', items: providerNote },
-    ],
-    sql: '',
-  }
-}
-
-function AiAnswer({ answer }) {
-  return (
-    <article className={`ai-answer ${answer.tone || 'info'}`}>
-      <h3>{answer.title}</h3>
-      <p>{answer.summary}</p>
-      {answer.sections.filter((section) => section.items?.length).map((section) => (
-        <section key={section.title}>
-          <h4>{section.title}</h4>
-          <ul>{section.items.map((item) => <li key={item}>{item}</li>)}</ul>
-        </section>
-      ))}
-      {answer.sql && <section><h4>{answer.sqlLabel || 'Suggested SQL'}</h4><pre><code>{answer.sql}</code></pre></section>}
-    </article>
-  )
-}
-
 export default function QuestWorkspace() {
   const navigate = useNavigate()
-  const { logout } = useAuth()
-  const [tabs, setTabs] = useState([{ id: 0, name: 'query.sql', sql: starterSql }])
+  const { logout, user } = useAuth()
+  const location = useLocation()
+  const draftKey = `querypulse:${user.id}:draft`
+  const [running, setRunning] = useState(false)
+  const [connectionName, setConnectionName] = useState('No active connection')
+  const [cursor, setCursor] = useState({ lineNumber: 1, column: 1 })
+  const runRef = useRef(null)
+  const [tabs, setTabs] = useState(() => [{ id: 0, name: 'query.sql', sql: location.state?.sql || location.state?.query || localStorage.getItem(draftKey) || starterSql }])
   const [activeTabId, setActiveTabId] = useState(0)
   const [notice, setNotice] = useState('Query ready')
-  const [resultRows, setResultRows] = useState(rows)
+  const [resultRows, setResultRows] = useState([])
   const [resultSearch, setResultSearch] = useState('')
-  const [history, setHistory] = useState(historySeed)
+  const [history, setHistory] = useState([])
   const [queryInsights, setQueryInsights] = useState([])
-  const [aiMode, setAiMode] = useState('overview')
-  const [aiLoading, setAiLoading] = useState(false)
-  const [thinkingStep, setThinkingStep] = useState(0)
   const [lastExecutionError, setLastExecutionError] = useState('')
   const [dialect, setDialect] = useState('mysql')
-  const [aiAnswer, setAiAnswer] = useState({
-    tone: 'info',
-    title: 'Ask QueryPulse AI',
-    summary: 'Choose Explain AI, Debug AI, or Optimize AI. I will analyze the SQL currently open in the editor and answer here.',
-    sections: [],
-    sql: '',
-  })
   const [executionPlan, setExecutionPlan] = useState({ loading: false, data: null, error: '' })
   const [staticAnalysis, setStaticAnalysis] = useState({ loading: false, data: null, error: '' })
   const [historyTop, setHistoryTop] = useState(394)
@@ -172,9 +68,12 @@ export default function QuestWorkspace() {
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId)
   const sql = activeTab?.sql || ''
+  useEffect(() => { localStorage.setItem(draftKey, sql) }, [draftKey, sql])
+  useEffect(() => { listConnections().then(({ data }) => setConnectionName(data.find((item) => item.is_active)?.name || 'No active connection')).catch(() => {}) }, [])
 
   function handleRequestError(error, fallbackMessage) {
-    const message = error?.response?.data?.detail || error?.message || fallbackMessage
+    const detail = error?.response?.data?.detail
+    const message = Array.isArray(detail) ? detail.map((item) => item.msg).join('. ') : detail || error?.message || fallbackMessage
     const sessionExpired = error?.response?.status === 401 || /invalid or expired token|authentication required/i.test(message)
     if (sessionExpired) {
       setNotice('Session expired. Redirecting to sign in...')
@@ -186,7 +85,7 @@ export default function QuestWorkspace() {
   }
 
   function setSql(value) {
-    if (!activeTab) return
+    if (!activeTab) { setTabs([{ id: 0, name: 'query.sql', sql: value }]); setActiveTabId(0); return }
     setTabs((current) => current.map((tab) => tab.id === activeTabId ? { ...tab, sql: value } : tab))
     setExecutionPlan({ loading: false, data: null, error: '' })
     setStaticAnalysis({ loading: false, data: null, error: '' })
@@ -232,7 +131,11 @@ export default function QuestWorkspace() {
     let cancelled = false
     listWorkspaceQueries()
       .then((response) => {
-        if (!cancelled) setQueryInsights(Array.isArray(response.data) ? response.data : [])
+        if (!cancelled) {
+          const records = Array.isArray(response.data) ? response.data : []
+          setQueryInsights(records)
+          setHistory(records.map((item) => [item.sql.replace(/\s+/g, ' ').slice(0, 35), item.status === 'error' ? 'Error' : (item.row_count || 0) + ' rows', new Date(item.created_at).toLocaleDateString(), item.status === 'success', item.sql]))
+        }
       })
       .catch((error) => {
         if (cancelled) return
@@ -302,22 +205,16 @@ export default function QuestWorkspace() {
     return () => window.removeEventListener('resize', alignHistory)
   }, [resultRows.length])
 
-  useEffect(() => {
-    if (!aiLoading) {
-      setThinkingStep(0)
-      return undefined
-    }
-    const interval = window.setInterval(() => {
-      setThinkingStep((current) => (current + 1) % thinkingMessages.length)
-    }, 1200)
-    return () => window.clearInterval(interval)
-  }, [aiLoading])
 
   async function runQuery() {
+    if (running) return
     if (!sql.trim()) {
       setNotice('Enter a query before running it')
       return
     }
+    setRunning(true)
+    setResultRows([])
+    setResultSearch('')
     setNotice('Running query...')
     let historyInfo = 'Error'
     let historyOk = false
@@ -330,7 +227,7 @@ export default function QuestWorkspace() {
       const liveRows = Array.isArray(result?.rows) ? result.rows : []
       setResultRows(liveRows)
       setLastExecutionError('')
-      setNotice(result?.message || `Executed successfully - ${liveRows.length} rows returned`)
+      setNotice((result?.message || `Executed successfully - ${liveRows.length} rows returned`) + (result?.truncated ? ' Showing first 1,000 rows.' : '') + (result?.history_warning ? ` ${result.history_warning}` : ''))
       historyInfo = liveRows.length
         ? `${liveRows.length} rows`
         : result?.affected_rows
@@ -344,7 +241,7 @@ export default function QuestWorkspace() {
       setResultRows([])
       setLastExecutionError(errorMessage)
       setNotice(errorMessage)
-    }
+    } finally { setRunning(false) }
     if (insightRecord) {
       setQueryInsights((current) => [
         insightRecord,
@@ -363,42 +260,16 @@ export default function QuestWorkspace() {
     setNotice('Loaded query from history')
   }
 
-  async function action(label, queryOverride = null) {
-    const normalized = label.toLowerCase()
-    const queryToAnalyze = queryOverride || sql
-    if (!queryToAnalyze.trim()) {
-      setNotice('Enter a query before asking AI')
-      setAiAnswer({ tone: 'warning', title: 'No SQL to analyze', summary: 'Write or load a query in the editor first.', sections: [], sql: '' })
-      return
-    }
-    setAiMode(normalized)
-    setAiLoading(true)
-    setNotice(`${label} AI is thinking...`)
-    try {
-      const response = normalized === 'explain'
-        ? await explainSql(queryToAnalyze, dialect)
-        : normalized === 'debug'
-          ? await debugSql(queryToAnalyze, lastExecutionError || null, dialect)
-          : normalized === 'optimize'
-            ? await optimizeSql(queryToAnalyze, dialect)
-            : await convertSql(queryToAnalyze, dialect, dialect === 'postgresql' ? 'mysql' : 'postgresql')
-      setAiAnswer(formatAiAnswer(normalized, response.data))
-      setNotice(`${label} AI analysis is ready`)
-    } catch (error) {
-      const failure = handleRequestError(error, 'AI analysis failed')
-      if (failure.sessionExpired) return
-      const message = failure.message
-      setAiAnswer({
-        tone: 'warning',
-        title: `${label} AI could not finish`,
-        summary: message,
-        sections: [{ title: 'What to check', items: ['Confirm the backend is running', 'Confirm Ollama is running with the configured model', 'Try the request again'] }],
-        sql: '',
-      })
-      setNotice(message)
-    } finally {
-      setAiLoading(false)
-    }
+  function formatQuery() {
+    try { setSql(format(sql, { language: dialect })); setNotice('SQL formatted') }
+    catch { setNotice('Could not format this SQL statement.') }
+  }
+  function exportCsv() {
+    if (!filteredResultRows.length) return
+    const escape = (value) => '"' + String(value ?? '').replaceAll('"', '""') + '"'
+    const csv = [resultColumns.map(escape).join(','), ...filteredResultRows.map((row) => resultColumns.map((column) => escape(row[column])).join(','))].join('\n')
+    const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }))
+    const link = document.createElement('a'); link.href = url; link.download = 'query-results.csv'; link.click(); URL.revokeObjectURL(url)
   }
 
   return (
@@ -410,17 +281,15 @@ export default function QuestWorkspace() {
             <button type="button" className="tab-add" onClick={addTab} aria-label="Open a new query tab">+</button>
           </div>
           <div className="quest-toolbar" aria-label="SQL actions">
-            <button className="run" onClick={runQuery}>▶ Run</button>
-            <button className="explain" disabled={aiLoading} onClick={() => action('Explain')}>✦ Explain AI</button>
-            <button className="optimize" disabled={aiLoading} onClick={() => action('Optimize')}>↗ Optimize AI</button>
-            <button className="debug" disabled={aiLoading} onClick={() => action('Debug')}>☼ Debug AI</button>
-            <button className="convert" disabled={aiLoading} onClick={() => action('Convert')}>↔ Convert</button>
+            <button ref={runRef} className="run" disabled={running || !sql.trim()} onClick={runQuery}>{running ? "Running…" : "▶ Run"}</button>
+            <button className="explain" onClick={formatQuery}>Format SQL</button>
+            <button className="convert" onClick={exportCsv} disabled={!filteredResultRows.length}>Export CSV</button>
             <button className="clear" onClick={() => setSql('')}>▱ Clear</button>
           </div>
           <div className="editor-shell">
-            <div className="editor-filebar"><span><b /> {activeTab?.name || 'No query open'}</span><select aria-label="Database dialect" value={dialect} onChange={(event) => { setDialect(event.target.value); setExecutionPlan({ loading: false, data: null, error: '' }); setStaticAnalysis({ loading: false, data: null, error: '' }) }}><option value="mysql">MySQL</option><option value="postgresql">PostgreSQL</option><option value="sqlite">SQLite</option></select></div>
-            <Editor height="294px" defaultLanguage="sql" value={sql} onChange={(value) => setSql(value || '')} theme="vs-dark" options={{ readOnly: !activeTab, minimap: { enabled: false }, fontSize: 14, fontFamily: 'JetBrains Mono', lineNumbers: 'on', scrollBeyondLastLine: false, padding: { top: 14, bottom: 14 }, automaticLayout: true }} />
-            <div className="editor-status"><span>Ln 11, Col 20</span><span>Spaces: 4</span><span>{dialect === 'postgresql' ? 'PostgreSQL' : dialect === 'sqlite' ? 'SQLite' : 'MySQL'}</span><b>✓ {notice}</b></div>
+            <div className="editor-filebar"><span><b /> {activeTab?.name || 'No query open'}</span><select aria-label="Database dialect" value={dialect} onChange={(event) => { setDialect(event.target.value); setExecutionPlan({ loading: false, data: null, error: '' }); setStaticAnalysis({ loading: false, data: null, error: '' }) }}><option value="mysql">MySQL</option></select></div>
+            <Editor onMount={(editor) => { editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runRef.current?.click()); editor.onDidChangeCursorPosition((event) => setCursor(event.position)) }} height="294px" defaultLanguage="sql" value={sql} onChange={(value) => setSql(value || '')} theme="vs-dark" options={{ readOnly: !activeTab, minimap: { enabled: false }, fontSize: 14, fontFamily: 'JetBrains Mono', lineNumbers: 'on', scrollBeyondLastLine: false, padding: { top: 14, bottom: 14 }, automaticLayout: true }} />
+            <div className="editor-status"><span>Ln {cursor.lineNumber}, Col {cursor.column}</span><span>Spaces: 4</span><span>{dialect === 'postgresql' ? 'PostgreSQL' : dialect === 'sqlite' ? 'SQLite' : 'MySQL'}</span><b>✓ {notice}</b></div>
           </div>
         </div>
 
@@ -433,28 +302,20 @@ export default function QuestWorkspace() {
               <button type="button" aria-label="View last matching result" title="View last matching result" onClick={viewLastResult} disabled={!filteredResultRows.length}>⇩</button>
             </form>
             <div ref={resultTableRef} className="result-table quest-scroll">{resultColumns.length > 0 && <div className="result-head" style={{ gridTemplateColumns: `repeat(${resultColumns.length}, minmax(110px, 1fr))` }}>{resultColumns.map((column) => <span key={column}>{column}</span>)}</div>}{filteredResultRows.length > 0 ? filteredResultRows.map((row, index) => <div className="result-row" style={{ gridTemplateColumns: `repeat(${resultColumns.length}, minmax(110px, 1fr))` }} key={index}>{resultColumns.map((column, columnIndex) => columnIndex === resultColumns.length - 1 ? <b key={column}>{String(row[column])}</b> : <span key={column}>{String(row[column])}</span>)}</div>) : <p className="result-empty">{resultRows.length ? 'No rows match your search.' : 'This statement returned no result rows.'}</p>}</div>
-            <footer><span>‹</span><span>1</span><span>›</span><small>10 / page⌄</small></footer>
+            <footer><small>{filteredResultRows.length} matching rows</small></footer>
           </section>
           <section className="quest-panel history-panel">
             <header><h2>♟ Query History</h2><button type="button" onClick={() => navigate('/history')}>View all</button></header>
-            <div className="history-list quest-scroll">{history.map(([query, info, time, ok, fullQuery], index) => <article key={`${fullQuery}-${index}`} onClick={() => loadHistoryQuery(fullQuery)} title="Load this query in the editor"><b className={ok ? 'ok' : 'bad'}>{ok ? '✓' : '×'}</b><div><strong>{query}</strong><small>MySQL &nbsp; <em className={ok ? '' : 'error'}>{info}</em></small></div><time>{time}</time><button onClick={(event) => event.stopPropagation()}>☆</button></article>)}</div>
-            <button type="button" className="history-clear" onClick={() => { setHistory([]); setNotice('Query history cleared') }}>♜ Clear history</button>
+            <div className="history-list quest-scroll">{history.map(([query, info, time, ok, fullQuery], index) => <article key={`${fullQuery}-${index}`} onClick={() => loadHistoryQuery(fullQuery)} title="Load this query in the editor"><b className={ok ? 'ok' : 'bad'}>{ok ? '✓' : '×'}</b><div><strong>{query}</strong><small>MySQL &nbsp; <em className={ok ? '' : 'error'}>{info}</em></small></div><time>{time}</time></article>)}</div>
+            <button type="button" className="history-clear" onClick={() => navigate("/history")}>Manage history and favorites</button>
           </section>
         </aside>
 
         <section ref={companionPanelRef} className="quest-panel companion-panel">
           <header><h2>♟ AI Companion</h2></header>
           <div className="companion-body">
-            <div className={`robot-mini ${aiLoading ? 'thinking' : ''}`} aria-label="SQL assistant robot" />
-            <div className="ai-conversation" aria-live="polite">
-              {aiLoading ? (
-                <div className="ai-thinking">
-                  <div className="thinking-dots" aria-hidden="true"><i /><i /><i /></div>
-                  <h3>{aiMode.charAt(0).toUpperCase() + aiMode.slice(1)} AI is thinking</h3>
-                  <p>{thinkingMessages[thinkingStep]}</p>
-                </div>
-              ) : <AiAnswer answer={aiAnswer} />}
-            </div>
+            <div className="robot-mini" aria-hidden="true" />
+            <div className="ai-conversation"><h3>Feature coming soon</h3><p>AI explanations, debugging, and optimization are coming soon.</p></div>
           </div>
         </section>
       </section>
@@ -532,7 +393,7 @@ export default function QuestWorkspace() {
                     </div>
                     <span className={`speed-label ${item.tone}`}>{formatDuration(item.execution_time_ms)} {item.tone === 'slow' ? 'SLOW' : ''}</span>
                     <button type="button" onClick={() => loadHistoryQuery(item.sql)}>Load query</button>
-                    <button type="button" onClick={() => { setSql(item.sql); action('Optimize', item.sql) }}>Optimize AI</button>
+
                   </section>
                 ))}
               </div>
@@ -540,7 +401,7 @@ export default function QuestWorkspace() {
           )}
         </article>
       </section>
-      <div className="quest-bottom-status"><span>● Connected to MySQL</span><span>✦ All systems operational</span><span>◉ Auto-saved 2m ago</span></div>
+      <div className="quest-bottom-status"><span>● {connectionName}</span><button onClick={() => navigate("/connections")}>Manage connections</button><span>◉ Draft saved in this browser</span></div>
     </div>
   )
 }
