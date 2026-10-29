@@ -26,7 +26,10 @@ export default function Login() {
     } catch (error) {
       const detail = error.response?.data?.detail
       const errorText = Array.isArray(detail) ? detail[0]?.msg : detail
-      setMessage({ type: 'error', text: typeof errorText === 'string' ? errorText : 'Unable to sign in. Please try again.' })
+      const fallback = error.response
+        ? `Sign-in service returned an error (${error.response.status}). Please try again.`
+        : 'Cannot reach the sign-in service. Check that the backend is running and try again.'
+      setMessage({ type: 'error', text: typeof errorText === 'string' ? errorText : fallback })
     } finally {
       setSubmitting(false)
     }

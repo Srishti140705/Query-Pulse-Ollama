@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import sys
+from urllib.parse import parse_qs
 
 ROOT = Path(__file__).resolve().parent.parent
 BACKEND_DIR = ROOT / 'backend'
@@ -19,8 +20,15 @@ from app.main import app
 
 @app.middleware('http')
 async def strip_public_api_prefix(request, call_next):
-    path = request.scope['path']
-    if path == '/api' or path.startswith('/api/'):
-        request.scope['path'] = path[4:] or '/'
+    # Vercel exposes this function at /api. The rewrite stores the original
+    # wildcard in ?path= so nested FastAPI routes are not discarded.
+    rewritten_path = parse_qs(request.scope.get('query_string', b'').decode()).get('path', [None])[0]
+    if rewritten_path is not None:
+        request.scope['path'] = '/' + rewritten_path.lstrip('/')
         request.scope['raw_path'] = request.scope['path'].encode()
+    else:
+        path = request.scope['path']
+        if path == '/api' or path.startswith('/api/'):
+            request.scope['path'] = path[4:] or '/'
+            request.scope['raw_path'] = request.scope['path'].encode()
     return await call_next(request)
