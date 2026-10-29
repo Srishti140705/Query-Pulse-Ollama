@@ -1,5 +1,14 @@
 import Editor from "@monaco-editor/react";
-import * as monaco from "monaco-editor";
+import { loader } from "@monaco-editor/react";
+import * as monaco from "monaco-editor/esm/vs/editor/editor.api";
+import "monaco-editor/esm/vs/editor/editor.all";
+import "monaco-editor/esm/vs/basic-languages/sql/sql.contribution";
+import EditorWorker from "monaco-editor/esm/vs/editor/editor.worker?worker";
+import { useLocation } from "react-router-dom";
+import api, { errorMessage } from "../services/api";
+import { readWorkspace, writeWorkspace, recordRun } from "../services/workspaceStorage";
+self.MonacoEnvironment = { getWorker: () => new EditorWorker() };
+loader.config({ monaco });
 import React, { useEffect, useRef, useState } from 'react'
 import { format } from "sql-formatter";
 import { analyzeQuery, executeQuery } from "../services/queryService";
@@ -20,14 +29,34 @@ import {
 
 
 export default function QueryEditor() {
-  const [sql, setSql] = useState('SELECT id, name, email FROM users WHERE active = 1 ORDER BY last_login DESC;')
-  const [database, setDatabase] = useState(() => localStorage.getItem('selectedDatabase') || 'mysql')
+  const location = useLocation()
+  const [sql, setSql] = useState(() => location.state?.query || readWorkspace('draft', 'SELECT id, name, department, salary FROM employees LIMIT 20;'))
+  const [databases, setDatabases] = useState([{ value: 'sqlite', label: 'SQLite workspace' }])
+  const [analysis, setAnalysis] = useState(null)
+  const [aiBusy, setAiBusy] = useState(false)
+  const [aiAdvice, setAiAdvice] = useState(null)
+  async function explainWithOllama() {
+    if (aiBusy || !sql.trim()) return
+    setAiBusy(true)
+    setAiAdvice(null)
+    try {
+      const { data } = await api.post('/ai/explain', { query: sql, database }, { timeout: 130000 })
+      setAiAdvice({ text: data.explanation, model: data.model })
+    } catch (error) {
+      setAiAdvice({ text: errorMessage(error), error: true })
+    } finally {
+      setAiBusy(false)
+    }
+  }
+  useEffect(() => { api.get('/databases').then(({ data }) => setDatabases(data)).catch(() => {}) }, [])
+  useEffect(() => { writeWorkspace('draft', sql) }, [sql])
+  const [database, setDatabase] = useState(() => location.state?.database || readWorkspace('selectedDatabase', 'sqlite'))
   const [message, setMessage] = useState(null)
   const [results, setResults] = useState([])
   const [loading, setLoading] = useState(false)
   const [history, setHistory] = useState([])
   const [favorites, setFavorites] = useState([])
-  const [executionTime, setExecutionTime] = useState(0)
+  const [executionTime, setExecutionTime] = useState('—')
   const [searchTerm, setSearchTerm] = useState('')
   const [sortConfig, setSortConfig] = useState({
     key: null,
@@ -45,32 +74,17 @@ export default function QueryEditor() {
   const editorRef = useRef(null);
   const runButtonRef = useRef(null);
   useEffect(() => {
-    localStorage.setItem('selectedDatabase', database)
+    writeWorkspace('selectedDatabase', database)
   }, [database])
 
-  useEffect(() => {
-    const savedHistory = localStorage.getItem('queryHistory')
 
-    if (savedHistory) {
-      setHistory(JSON.parse(savedHistory))
-    }
+  useEffect(() => {
+    setHistory([...new Set(readWorkspace('runs').map((run) => run.query))])
+    setFavorites(readWorkspace('favoriteQueries'))
+    setAnalytics(readWorkspace('runs').filter((run) => run.status === 'Successful').reverse().map((run) => ({ ...run, timestamp: new Date(run.createdAt).toLocaleTimeString(), queryType: run.type })))
   }, [])
 
-  useEffect(() => {
-    const savedFavorites = localStorage.getItem('favoriteQueries')
 
-    if (savedFavorites) {
-      setFavorites(JSON.parse(savedFavorites))
-    }
-  }, [])
-
-  useEffect(() => {
-  const savedAnalytics = localStorage.getItem('queryAnalytics')
-
-  if (savedAnalytics) {
-    setAnalytics(JSON.parse(savedAnalytics))
-  }
-}, [])
 
   useEffect(() => {
     setStaticWarnings(analyzeSQL(sql))
@@ -82,13 +96,16 @@ export default function QueryEditor() {
 
     const timeout = window.setTimeout(async () => {
       if (!sql.trim()) {
+        setAnalysis(null)
         setExecutionPlan({ queryType: '--', estimatedCost: '--', tables: [], suggestions: [] })
         return
       }
 
       try {
         const response = await analyzeQuery(sql, database)
-        if (!isCurrent || response.error) return
+        if (!isCurrent) return
+        if (response.error) throw new Error(response.error)
+        setAnalysis(response.analysis)
 
         const suggestions = [...(response.analysis?.recommendations || [])]
         if (/\bSELECT\s+\*/i.test(sql)) suggestions.push('Avoid SELECT *; select only the columns you need.')
@@ -103,6 +120,7 @@ export default function QueryEditor() {
           suggestions: [...new Set(suggestions)],
         })
       } catch (error) {
+        if (isCurrent) setAnalysis(null)
         if (isCurrent) setExecutionPlan({ queryType: '--', estimatedCost: '--', tables: [], suggestions: [] })
       }
     }, 300)
@@ -111,15 +129,20 @@ export default function QueryEditor() {
       isCurrent = false
       window.clearTimeout(timeout)
     }
-  }, [sql])
+  }, [sql, database])
   async function handleRun() {
+    if (loading || !sql.trim()) return
+    setResults([])
+    setExecutionTime('—')
+    setSearchTerm('')
+    setSortConfig({ key: null, direction: 'asc' })
     setStaticWarnings(analyzeSQL(sql))
     setLoading(true)
     const startTime = performance.now()
     try {
       const response = await executeQuery(sql, database)
-      if (response.result.error) {
-        throw new Error(response.result.error)
+      if (response.error || response.result?.error) {
+        throw new Error(response.error || response.result.error)
       }
 
       setResults(response.result.rows || [])
@@ -139,6 +162,7 @@ export default function QueryEditor() {
 
       setExecutionTime(displayTime)
 
+      recordRun({ query: sql, database, status: 'Successful', executionTime: elapsed, rowsReturned: response.result.row_count || 0, type: sql.trim().split(/\s+/)[0].toUpperCase() })
       const executionValue = elapsed
 
       setAnalytics((prev) => {
@@ -153,10 +177,7 @@ export default function QueryEditor() {
     },
   ]
 
-  localStorage.setItem(
-    "queryAnalytics",
-    JSON.stringify(updated)
-  )
+  writeWorkspace("queryAnalytics", updated.slice(-500))
 
   return updated
 })
@@ -165,28 +186,26 @@ export default function QueryEditor() {
         ...prev.filter((item) => item !== sql),
       ])
 
-      console.log('History Updated')
+
       setLoading(false)
 
-      console.log('Backend Response:', response)
+
 
       setMessage({
         type: 'success',
-        text: 'Query executed successfully.',
+        text: `Query executed successfully. ${response.result.row_count || 0} rows ${response.result.rows ? 'returned' : 'affected'}.${response.result.truncated ? ' Showing the first 1,000 rows.' : ''}`,
       })
 
       window.setTimeout(() => setMessage(null), 3000)
     } catch (error) {
       setLoading(false)
 
-      console.error(error)
-
+      recordRun({ query: sql, database, status: 'Error', executionTime: performance.now() - startTime, rowsReturned: 0, type: sql.trim().split(/\s+/)[0].toUpperCase(), error: errorMessage(error) })
+      setHistory((prev) => [sql, ...prev.filter((item) => item !== sql)])
       setMessage({
         type: 'error',
         text:
-          error.response?.data?.error ||
-          error.message ||
-          'Failed to execute query.',
+          errorMessage(error),
       })
 
       window.setTimeout(() => setMessage(null), 3000)
@@ -209,11 +228,10 @@ export default function QueryEditor() {
   function exportToCSV() {
     if (filteredResults.length === 0) return
 
-    const headers = Object.keys(results[0]).join(',')
-
-    const rows = results.map((row) =>
-      Object.values(row).join(','),
-    )
+    const escape = (value) => '"' + String(value ?? '').replaceAll('"', '""') + '"'
+    const columns = Object.keys(results[0])
+    const headers = columns.map(escape).join(',')
+    const rows = filteredResults.map((row) => columns.map((column) => escape(row[column])).join(','))
 
     const csvContent = [headers, ...rows].join('\n')
 
@@ -307,10 +325,13 @@ const COLORS = [
   "#C084FC",
 ]
 
+  const displayAnalytics = analytics
+  const displayQueryTypes = queryTypeData
+
   return (
     <div className="mx-auto grid max-w-[1500px] gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(380px,0.85fr)]">
       <div className="space-y-6">
-        <section className="ide-card ide-fade-in p-5 sm:p-6">
+        <section className="ide-card ide-fade-in overflow-hidden p-5 sm:p-6">
           <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
             <div className="min-w-0">
               <p className="font-code text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">Query editor</p>
@@ -319,8 +340,9 @@ const COLORS = [
             </div>
 
             <div className="flex flex-wrap gap-2">
-              <button onClick={handleFormat} className="ide-button">Format</button>
-              <button ref={runButtonRef} onClick={handleRun} disabled={loading} className="ide-button-primary min-w-28">
+              <button onClick={handleFormat} className="ide-button border-amber-300/30 bg-amber-400/10 text-amber-100 hover:bg-amber-400/20">Format</button>
+              <button onClick={explainWithOllama} disabled={aiBusy || !sql.trim()} className="ide-button">{aiBusy ? 'Thinking…' : 'Explain with Ollama'}</button>
+              <button ref={runButtonRef} onClick={handleRun} disabled={loading || !sql.trim()} className="ide-button-primary min-w-28 bg-emerald-500 hover:bg-emerald-400">
                 {loading ? (
                   <span className="inline-flex items-center gap-2">
                     <span className="h-3 w-3 animate-spin rounded-full border-2 border-white/40 border-t-white" />
@@ -328,96 +350,64 @@ const COLORS = [
                   </span>
                 ) : 'Run query'}
               </button>
-              <button onClick={exportToCSV} disabled={results.length === 0} className="ide-button">Export CSV</button>
+              <button onClick={exportToCSV} disabled={results.length === 0} className="ide-button border-sky-300/30 bg-sky-400/10 text-sky-100 hover:bg-sky-400/20">Export CSV</button>
               <button onClick={() => setSql('')} className="ide-button">Clear</button>
             </div>
           </div>
 
+          {aiAdvice && <div role={aiAdvice.error ? 'alert' : 'status'} className="mt-5 rounded-xl border border-[var(--border)] p-4">
+            <p className="mb-2 font-semibold">{aiAdvice.error ? 'Ollama unavailable' : `Ollama · ${aiAdvice.model}`}</p>
+            <p className="whitespace-pre-wrap text-sm">{aiAdvice.text}</p>
+            {!aiAdvice.error && <p className="mt-3 text-xs text-[var(--muted)]">AI advice may be inaccurate. Review suggestions before running SQL.</p>}
+          </div>}
           <div className="relative mt-6">
-            <div className="overflow-hidden rounded-2xl border border-[var(--border)] bg-[#0A0716] shadow-inner">
-              <div className="flex h-10 items-center justify-between border-b border-[var(--border)] bg-[var(--surface)]/80 px-4 font-code text-xs text-[var(--muted)]">
-              <span>console.sql</span>
-              <select value={database} onChange={(event) => setDatabase(event.target.value)} className="bg-transparent font-code text-xs text-[var(--muted)] outline-none">
-                <option value="mysql">MySQL</option>
-                <option value="postgresql">PostgreSQL</option>
-                <option value="sqlite">SQLite</option>
-                <option value="mariadb">MariaDB</option>
-              </select>
-            </div>
-            <Editor
-  height="360px"
-  defaultLanguage="sql"
-  value={sql}
-  onChange={(value) => setSql(value || "")}
-  onMount={(editor, monacoInstance) => {
-  console.log("Monaco mounted");
-
-  editorRef.current = editor;
-
-  console.log(editor);
-
-  editor.addCommand(
-    monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyCode.Enter,
-    () => {
-      runButtonRef.current?.click();
-    },
-  );
-
-  editor.addCommand(
-    monacoInstance.KeyMod.CtrlCmd | monacoInstance.KeyMod.Shift | monacoInstance.KeyCode.KeyF,
-    () => {
-      handleFormat();
-    },
-  );
-}}
-  theme="vs-dark"
-  options={{
-    minimap: { enabled: false },
-    fontSize: 15,
-    fontFamily: "JetBrains Mono",
-    fontLigatures: true,
-    automaticLayout: true,
-    wordWrap: "on",
-    scrollBeyondLastLine: false,
-    lineNumbers: "on",
-    tabSize: 2,
-    insertSpaces: true,
-    renderLineHighlight: "all",
-    cursorBlinking: "smooth",
-    cursorSmoothCaretAnimation: "on",
-    smoothScrolling: true,
-    padding: {
-      top: 16,
-      bottom: 16,
-    },
-    roundedSelection: true,
-    scrollbar: {
-      verticalScrollbarSize: 10,
-      horizontalScrollbarSize: 10,
-    },
-  }}
-/>
+            <div className="overflow-hidden rounded-2xl border border-violet-400/30 bg-[#0A0716] shadow-[0_0_38px_rgba(124,58,237,0.18)]">
+              <div className="flex h-11 items-center justify-between border-b border-[var(--border)] bg-[#171032] px-4 font-code text-xs text-[var(--muted)]">
+              <span className="inline-flex items-center gap-2 text-violet-100"><span className="h-2 w-2 rounded-full bg-emerald-400" />console.sql</span>
+                <select value={database} onChange={(event) => setDatabase(event.target.value)} className="bg-transparent font-code text-xs text-[var(--muted)] outline-none">
+                  {databases.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+                </select>
+              </div>
+              <Editor
+                height="360px"
+                defaultLanguage="sql"
+                value={sql}
+                onMount={(editor) => {
+                  editorRef.current = editor
+                  monaco.editor.setTheme('vs-dark')
+                  editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => runButtonRef.current?.click())
+                }}
+                onChange={(value) => setSql(value || '')}
+                theme="vs-dark"
+                options={{
+                  minimap: { enabled: false },
+                  fontFamily: 'JetBrains Mono, IBM Plex Mono, Consolas, monospace',
+                  fontSize: readWorkspace('editorFontSize', 14),
+                  lineNumbers: readWorkspace('lineNumbers', true) ? 'on' : 'off',
+                  lineHeight: 22,
+                  wordWrap: 'on',
+                  automaticLayout: true,
+                  padding: { top: 16, bottom: 16 },
+                }}
+              />
             </div>
             {staticWarnings.length > 0 && !warningsDismissed && (
-              <div className="absolute inset-x-3 top-full z-20 mt-2 rounded-xl border border-amber-400/40 bg-[#241A2F] p-4 shadow-2xl shadow-black/30">
-                <div className="flex items-start gap-3">
-                  <span className="mt-0.5 text-amber-300" aria-hidden="true">&#9888;</span>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium text-amber-100">Static analysis warnings</p>
-                    <ul className="mt-2 space-y-1.5 text-sm leading-5 text-amber-100/75">
-                      {staticWarnings.map((warning) => (
-                        <li key={warning.title}><span className="font-medium text-amber-100">{warning.title}:</span> {warning.message}</li>
-                      ))}
-                    </ul>
-                  </div>
-                  <button onClick={() => setWarningsDismissed(true)} className="-mr-1 -mt-1 rounded-lg p-1 text-amber-100/70 transition hover:bg-amber-400/10 hover:text-amber-100" aria-label="Dismiss static analysis warnings">&times;</button>
+              <div className="mt-4 flex items-start justify-between gap-4 rounded-xl border border-amber-300/20 bg-amber-400/10 p-4 text-sm text-amber-100">
+                <div>
+                  <p className="font-heading font-semibold">Static analysis warnings</p>
+                  <ul className="mt-2 space-y-1 text-amber-100/80">
+                    {staticWarnings.map((warning) => (
+                      <li key={warning.title}><span className="font-medium text-amber-100">{warning.title}:</span> {warning.message}</li>
+                    ))}
+                  </ul>
                 </div>
+                <button onClick={() => setWarningsDismissed(true)} className="-mr-1 -mt-1 rounded-lg p-1 text-amber-100/70 transition hover:bg-amber-400/10 hover:text-amber-100" aria-label="Dismiss static analysis warnings">&times;</button>
               </div>
             )}
           </div>
 
           <div className="mt-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-            <div className="ide-surface font-code px-4 py-3 text-xs text-[var(--muted)]">Dialect: {database === "postgresql" ? "PostgreSQL" : database === "sqlite" ? "SQLite" : database === "mariadb" ? "MariaDB" : "MySQL"} / Safety: enabled / Timeout: 30s</div>
+            <div className="ide-surface font-code px-4 py-3 text-xs text-[var(--muted)]">Dialect: {database === "postgresql" ? "PostgreSQL" : database === "sqlite" ? "SQLite" : database === "mariadb" ? "MariaDB" : "MySQL"} / Single statement / Maximum 1,000 result rows</div>
             {message && (
               <div className={`rounded-xl px-4 py-3 text-sm transition-all duration-200 ${message.type === 'success' ? 'border border-emerald-400/20 bg-emerald-400/10 text-emerald-200' : 'border border-rose-400/20 bg-rose-400/10 text-rose-200'}`}>
                 {message.text}
@@ -427,7 +417,7 @@ const COLORS = [
         </section>
 
         <section className="grid items-stretch gap-6 lg:grid-cols-2">
-          <PanelCard title="Execution plan" description="A preview of the query plan, warnings, and optimization suggestions.">
+          <PanelCard title="Query analysis" description="SQL structure and heuristic suggestions. These are not database execution-plan measurements.">
             <div className="mt-5 space-y-4 text-sm">
               <div className="grid grid-cols-2 gap-3">
                 <PlanMetric label="Query type" value={executionPlan.queryType} />
@@ -449,7 +439,15 @@ const COLORS = [
               </div>
             </div>
           </PanelCard>
-          <PanelCard title="Static analysis" description="Score, unused columns, missing indexes, and style recommendations." />
+          <PanelCard title="Static analysis" description="Heuristic quality score and SQL warnings.">
+            <StaticAnalysisDashboard analysis={analysis} tableCount={executionPlan.tables.length} />
+          </PanelCard>
+          <PanelCard title="AI integration" description="Local explanations powered by Ollama.">
+            <div className="mt-4 space-y-2 text-sm text-[var(--muted)]">
+              <p>Use <span className="font-semibold text-[var(--text)]">Explain with Ollama</span> above to review the current SQL.</p>
+              <p>Only the query and selected dialect are sent to your local model. Query results are not shared or executed by the AI.</p>
+            </div>
+          </PanelCard>
         </section>
 
         <section className="ide-card p-5 sm:p-6">
@@ -458,13 +456,13 @@ const COLORS = [
               <p className="font-code text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">Analytics</p>
               <h2 className="font-heading mt-2 text-xl font-semibold text-[var(--text)]">Query performance charts</h2>
             </div>
-            <span className="font-code text-xs text-[var(--muted)]">{analytics.length} samples</span>
+            <span className="font-code text-xs text-[var(--muted)]">{analytics.length ? `${analytics.length} live samples` : 'Run a query to see your performance data'}</span>
           </div>
 
           <div className="grid gap-6 2xl:grid-cols-2">
             <ChartCard title="Execution Time Trend">
               <ResponsiveContainer width="100%" height={320}>
-                <LineChart data={analytics} margin={{ top: 12, right: 24, bottom: 28, left: 0 }}>
+                <LineChart data={displayAnalytics} margin={{ top: 12, right: 24, bottom: 28, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(169, 155, 200, 0.16)" />
                   <XAxis dataKey="timestamp" tick={{ fill: '#A99BC8', fontSize: 12 }} tickMargin={12} minTickGap={28} stroke="rgba(169, 155, 200, 0.45)" />
                   <YAxis tick={{ fill: '#A99BC8', fontSize: 12 }} tickMargin={10} stroke="rgba(169, 155, 200, 0.45)" width={44} />
@@ -477,8 +475,8 @@ const COLORS = [
             <ChartCard title="Query Type Distribution">
               <ResponsiveContainer width="100%" height={320}>
                 <PieChart margin={{ top: 8, right: 8, bottom: 8, left: 8 }}>
-                  <Pie data={queryTypeData} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={58} outerRadius={108} paddingAngle={3}>
-                    {queryTypeData.map((entry, index) => (
+                  <Pie data={displayQueryTypes} dataKey="value" nameKey="name" cx="50%" cy="48%" innerRadius={58} outerRadius={108} paddingAngle={3}>
+                    {displayQueryTypes.map((entry, index) => (
                       <Cell key={entry.name} fill={COLORS[index % COLORS.length]} />
                     ))}
                   </Pie>
@@ -516,13 +514,16 @@ const COLORS = [
 
   
 
-          <div className="mt-6 max-h-[420px] overflow-auto rounded-2xl border border-[var(--border)]">
+          <div
+            className="ide-scrollbar mt-6 overflow-x-auto overflow-y-scroll rounded-2xl border border-[var(--border)]"
+            style={{ height: '292px' }}
+          >
             {results.length === 0 ? (
               <div className="p-8 text-center text-sm text-[var(--muted)]">
                 No records found. Execute a SELECT query to display results.
               </div>
             ) : (
-              <table className="ide-table">
+              <table className="ide-table min-w-max">
                 <thead>
                   <tr>
                     {Object.keys(results[0]).map((column) => (
@@ -537,7 +538,7 @@ const COLORS = [
                                 : 'asc',
                           }))
                         }}
-                        className="cursor-pointer select-none hover:text-[var(--accent-strong)]"
+                        className="cursor-pointer select-none whitespace-nowrap hover:text-[var(--accent-strong)]"
                       >
                         {column}
                         {sortConfig.key === column &&
@@ -563,9 +564,13 @@ const COLORS = [
           </div>
         </section>
 
-        <QueryList title="Query history" empty="No queries executed yet.">
+        <QueryList
+          title="Query history"
+          empty="No queries executed yet."
+          listClassName="ide-scrollbar h-[228px] overflow-y-scroll pr-2"
+        >
           {history.map((item, index) => (
-            <div key={index} className="group flex items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)]/80 p-3 transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--accent)]/60">
+            <div key={index} className="group flex min-h-[68px] items-center justify-between gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)]/80 p-3 transition-all duration-200 hover:-translate-y-0.5 hover:border-[var(--accent)]/60">
               <code onClick={() => setSql(item)} className="font-code block min-w-0 flex-1 cursor-pointer truncate text-sm text-[var(--text)]">
                 {item}
               </code>
@@ -578,10 +583,7 @@ const COLORS = [
 
                   setFavorites(updatedFavorites)
 
-                  localStorage.setItem(
-                    'favoriteQueries',
-                    JSON.stringify(updatedFavorites),
-                  )
+                  writeWorkspace('favoriteQueries', updatedFavorites)
                 }}
                 className="ide-button h-9 w-9 px-0"
                 aria-label={favorites.includes(item) ? 'Remove favorite' : 'Add favorite'}
@@ -623,6 +625,103 @@ function PanelCard({ title, description, children }) {
 function PlanMetric({ label, value }) {
   return <div className="ide-surface p-3"><p className="font-code text-[10px] uppercase tracking-[0.08em] text-[var(--muted)]">{label}</p><p className="mt-2 font-code text-sm text-[var(--text)]">{value}</p></div>
 }
+
+function StaticAnalysisDashboard({ analysis, tableCount }) {
+  const hasAnalysis = Boolean(analysis)
+  const score = analysis?.performance_score ?? 0
+  const warnings = analysis?.warnings || []
+  const recommendations = analysis?.recommendations || []
+  const complexity = analysis?.complexity || '—'
+  const estimatedCost = analysis?.estimated_cost || '—'
+  const radius = 52
+  const circumference = 2 * Math.PI * radius
+  const progress = hasAnalysis ? (score / 100) * circumference : 0
+  const scoreColor = score >= 80 ? '#34D399' : score >= 60 ? '#FBBF24' : '#FB7185'
+  const complexityColor = complexity === 'Low' ? '#34D399' : complexity === 'Medium' ? '#FBBF24' : complexity === 'High' ? '#FB7185' : '#A99BC8'
+  const complexityIndex = complexity === 'Low' ? 0 : complexity === 'Medium' ? 1 : complexity === 'High' ? 2 : -1
+
+  return (
+    <div className="mt-5 space-y-4">
+      <div className="grid gap-4 sm:grid-cols-[170px_minmax(0,1fr)]">
+        <div className="ide-surface flex min-h-[190px] items-center justify-center p-4">
+          <div className="relative h-36 w-36" aria-label={hasAnalysis ? `Quality score ${score} out of 100` : 'Quality score unavailable'}>
+            <svg viewBox="0 0 128 128" className="h-full w-full -rotate-90" role="img">
+              <circle cx="64" cy="64" r={radius} fill="none" stroke="rgba(169, 155, 200, 0.14)" strokeWidth="10" />
+              <circle
+                cx="64"
+                cy="64"
+                r={radius}
+                fill="none"
+                stroke={scoreColor}
+                strokeWidth="10"
+                strokeLinecap="round"
+                strokeDasharray={circumference}
+                strokeDashoffset={circumference - progress}
+                className="transition-all duration-700"
+              />
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center">
+              <span className="font-code text-3xl font-semibold text-[var(--text)]">{hasAnalysis ? score : '—'}</span>
+              <span className="font-code text-[10px] uppercase tracking-[0.16em] text-[var(--muted)]">quality score</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="ide-surface p-4">
+          <div className="flex items-center justify-between gap-3">
+            <p className="font-code text-[10px] uppercase tracking-[0.12em] text-[var(--muted)]">Complexity</p>
+            <span className="rounded-full border px-2.5 py-1 font-code text-xs font-semibold" style={{ borderColor: `${complexityColor}55`, color: complexityColor, backgroundColor: `${complexityColor}12` }}>{complexity}</span>
+          </div>
+          <div className="mt-4 grid grid-cols-3 gap-2" aria-label={`Complexity level ${complexity}`}>
+            {['Low', 'Medium', 'High'].map((level, index) => (
+              <div key={level}>
+                <div className="h-2 rounded-full transition-all duration-500" style={{ backgroundColor: index <= complexityIndex ? complexityColor : 'rgba(169, 155, 200, 0.14)' }} />
+                <p className="mt-2 text-center font-code text-[9px] uppercase text-[var(--muted)]">{level}</p>
+              </div>
+            ))}
+          </div>
+          <div className="mt-5 grid grid-cols-2 gap-2">
+            <AnalysisMetric label="Warnings" value={warnings.length} tone={warnings.length ? '#FBBF24' : '#34D399'} />
+            <AnalysisMetric label="Suggestions" value={recommendations.length} tone="#A78BFA" />
+            <AnalysisMetric label="Est. cost" value={estimatedCost} tone={complexityColor} />
+            <AnalysisMetric label="Tables" value={tableCount} tone="#60A5FA" />
+          </div>
+        </div>
+      </div>
+
+      <div className="ide-surface p-4">
+        <div className="flex items-center justify-between gap-3">
+          <p className="font-code text-[10px] uppercase tracking-[0.12em] text-[var(--muted)]">Findings</p>
+          <span className="font-code text-[10px] text-[var(--muted)]">Live as you type</span>
+        </div>
+        {!hasAnalysis ? (
+          <p className="mt-3 text-sm text-[var(--muted)]">Enter a valid SQL statement to generate the analysis graph.</p>
+        ) : warnings.length ? (
+          <ul className="mt-3 space-y-2 text-sm text-[var(--muted)]">
+            {warnings.map((warning) => (
+              <li key={warning} className="flex items-start gap-2">
+                <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-amber-300" />
+                <span>{warning}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="mt-3 flex items-center gap-2 text-sm text-emerald-300"><span className="h-2 w-2 rounded-full bg-emerald-400" />No heuristic warnings detected.</p>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function AnalysisMetric({ label, value, tone }) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--panel)]/40 p-2.5">
+      <p className="font-code text-[9px] uppercase tracking-[0.08em] text-[var(--muted)]">{label}</p>
+      <p className="mt-1 font-code text-lg font-semibold" style={{ color: tone }}>{value}</p>
+    </div>
+  )
+}
+
 function ChartCard({ title, children }) {
   return (
     <div className="ide-surface p-5">
@@ -649,13 +748,13 @@ function AnalyticsTile({ label, value, wide = false }) {
   )
 }
 
-function QueryList({ title, empty, children }) {
+function QueryList({ title, empty, children, listClassName = '' }) {
   const hasItems = React.Children.count(children) > 0
 
   return (
     <section className="ide-card p-5 sm:p-6">
       <p className="font-code text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">{title}</p>
-      <div className="mt-5 space-y-3">
+      <div className={`mt-5 space-y-3 ${listClassName}`}>
         {hasItems ? children : (
           <p className="rounded-xl border border-dashed border-[var(--border)] p-4 text-sm text-[var(--muted)]">{empty}</p>
         )}

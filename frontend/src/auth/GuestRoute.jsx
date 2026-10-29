@@ -3,7 +3,9 @@ import { Navigate } from 'react-router-dom'
 import { useAuth } from './AuthProvider'
 
 export default function GuestRoute({ children }) {
-  const { isAuthenticated } = useAuth()
+  const { isAuthenticated, loading } = useAuth()
+
+  if (loading) return <p className="p-8" role="status">Loading your workspace…</p>
 
   if (isAuthenticated) {
     return <Navigate to="/dashboard" replace />

@@ -16,7 +16,7 @@ export default function Navbar() {
 
   return (
     <header className="border-b border-[var(--border)] bg-[var(--bg)]/85 text-[var(--text)] backdrop-blur-xl">
-      <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-6 py-5 sm:px-8">
+      <div className="mx-auto flex max-w-7xl flex-wrap items-center justify-between gap-4 px-6 py-5 sm:px-8">
         <Link to="/" className="flex items-center gap-3">
           <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-[var(--accent)] to-[var(--accent-strong)] font-heading font-bold text-[var(--accent-text)] shadow-lg shadow-violet-950/40">
             QP
@@ -27,7 +27,7 @@ export default function Navbar() {
           </div>
         </Link>
 
-        <nav className="hidden items-center gap-3 md:flex">
+        <nav className="order-3 flex w-full flex-wrap items-center gap-1 md:order-none md:w-auto md:gap-3">
           {navItems.map((item) => (
             <NavLink key={item.to} to={item.to} active={location.pathname === item.to}>
               {item.label}
@@ -37,7 +37,7 @@ export default function Navbar() {
 
         <div className="flex items-center gap-3">
           {!isAuthenticated ? (
-            <div className="hidden items-center gap-2 md:flex">
+            <div className="flex items-center gap-2">
               <Link to="/login" className="ide-button">
                 Login
               </Link>
@@ -47,7 +47,7 @@ export default function Navbar() {
             </div>
           ) : (
             <Menu as="div" className="relative inline-block text-left">
-              <Menu.Button className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--surface)] ring-1 ring-[var(--border)] transition hover:ring-[var(--accent)]">
+              <Menu.Button aria-label="Account menu" className="flex h-11 w-11 items-center justify-center rounded-xl bg-[var(--surface)] ring-1 ring-[var(--border)] transition hover:ring-[var(--accent)]">
                 <span className="text-sm font-semibold text-[var(--text)]">
                   {user?.name?.split(' ').map((part) => part[0]).join('')}
                 </span>
@@ -63,6 +63,7 @@ export default function Navbar() {
               >
                 <Menu.Items className="absolute right-0 z-20 mt-3 w-56 origin-top-right rounded-2xl border border-[var(--border)] bg-[var(--panel)]/95 p-2 shadow-2xl backdrop-blur-xl focus:outline-none">
                   <div className="space-y-1">
+                    <MenuItem to="/dashboard">Dashboard</MenuItem>
                     <MenuItem to="/profile">My Profile</MenuItem>
                     <MenuItem to="/history">Query History</MenuItem>
                     <MenuItem to="/settings">Settings</MenuItem>

@@ -1,5 +1,7 @@
 # QueryPulse
 
+For current setup, deployment, verified features, and configuration requirements, see [Running QueryPulse](docs/RUNNING.md). The roadmap below describes the original project plan.
+
 A modern SQL developer workspace for writing, analyzing, optimizing, and managing SQL queries.
 
 ---

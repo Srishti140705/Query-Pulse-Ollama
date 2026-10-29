@@ -52,7 +52,7 @@ class QueryAnalyzer:
 
         # Rule: Penalize missing LIMIT for SELECT queries
         if qtype == "SELECT":
-            if not limit:
+            if limit is None:
                 score -= 15
                 warnings.append("Missing LIMIT clause on SELECT query")
                 recommendations.append(
@@ -85,7 +85,7 @@ class QueryAnalyzer:
             )
 
         # Rule: Penalize ORDER BY without LIMIT (can cause full sort)
-        if order_by and not limit and qtype == "SELECT":
+        if order_by and limit is None and qtype == "SELECT":
             score -= 10
             warnings.append("ORDER BY used without LIMIT")
             recommendations.append(

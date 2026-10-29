@@ -13,7 +13,7 @@ const navItems = [
 export default function AuthenticatedLayout() {
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const location = useLocation()
-  const { user } = useAuth()
+  const { user, logout } = useAuth()
 
   const breadcrumbs = useMemo(() => {
     const segments = location.pathname.split('/').filter(Boolean)
@@ -52,6 +52,7 @@ export default function AuthenticatedLayout() {
               <NavLink
                 key={item.to}
                 to={item.to}
+                onClick={() => setSidebarOpen(false)}
                 className={({ isActive }) =>
                   `flex h-11 items-center justify-between rounded-xl px-4 text-sm font-medium transition-all duration-200 ${
                     isActive ? 'bg-[var(--accent)] text-[var(--accent-text)] shadow-lg shadow-violet-950/30' : 'text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--text)]'
@@ -84,7 +85,7 @@ export default function AuthenticatedLayout() {
               </div>
 
               <div className="flex flex-wrap items-center gap-3 sm:flex-nowrap">
-                <button className="ide-button">Notifications</button>
+                <Link to="/documentation" className="ide-button">Documentation</Link><button className="ide-button" onClick={logout}>Sign out</button>
                 <div className="inline-flex h-11 items-center gap-3 rounded-xl border border-[var(--border)] bg-[var(--surface)] px-3">
                   <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-[var(--accent)] to-[var(--accent-strong)] font-heading text-sm font-semibold text-white">
                     {initials}

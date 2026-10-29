@@ -1,114 +1,46 @@
-from __future__ import annotations
-
-from typing import Any, Dict, List, Optional
-
-import mysql.connector
-
-from app.database import get_connection, close_connection
-
+"""Private SQLite SQL workspaces, kept separate from account credentials."""
+import os
+import sqlite3
+import time
+from pathlib import Path
 
 class QueryExecutor:
-    """Execute SQL queries against the configured MySQL database.
+    def __init__(self, database='sqlite', user_id=None):
+        if database != 'sqlite':
+            raise ValueError('Select the SQLite workspace for execution. Other dialects are supported for analysis only.')
+        if user_id is None:
+            raise ValueError('A signed-in user is required.')
+        folder = Path(os.getenv('QUERYPULSE_DATA_DIR', str(Path(__file__).resolve().parents[2] / 'data'))) / 'workspaces'
+        folder.mkdir(parents=True, exist_ok=True)
+        self.path = folder / f'{int(user_id)}.db'
 
-    This class provides two convenience methods:
-      - execute_select: for read-only SELECT queries (returns rows)
-      - execute_write: for INSERT/UPDATE/DELETE (commits changes)
-
-    Both methods return JSON-friendly dictionaries and ensure connections
-    and cursors are closed correctly. SQL errors are caught and returned
-    as an "error" string in the result.
-    """
-
-    def __init__(self, database: str = 'mysql') -> None:
-        self.database = database
-
-    def execute_select(self, query: str, params: Optional[tuple] = None) -> Dict[str, Any]:
-        """Execute a SELECT query and return rows as a list of dictionaries.
-
-        Args:
-            query: The SQL SELECT statement to execute.
-            params: Optional tuple of parameters for parameterized queries.
-
-        Returns:
-            A dictionary with keys:
-              - "rows": List[Dict[str, Any]] (result rows)
-              - "row_count": int
-              - "error": str (only present on failure)
-        """
-        if self.database not in {'mysql', 'mariadb'}:
-            return {'error': f'{self.database} execution adapter is not configured.'}
-
-        conn = None
-        cursor = None
+    def execute(self, query):
+        conn = sqlite3.connect(self.path, timeout=5)
+        conn.row_factory = sqlite3.Row
         try:
-            conn = get_connection()
-            cursor = conn.cursor(dictionary=True)
-            cursor.execute(query, params or ())
-            rows = cursor.fetchall()
-            # Ensure all values are JSON-serializable; mysql-connector returns native types
-            return {"rows": rows, "row_count": len(rows)}
-
-        except mysql.connector.Error as exc:
-            # Return a JSON-friendly error description
-            return {"error": str(exc)}
-
-        finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
-            if conn is not None:
-                try:
-                    close_connection(conn)
-                except Exception:
-                    pass
-
-    def execute_write(self, query: str, params: Optional[tuple] = None) -> Dict[str, Any]:
-        """Execute a write query (INSERT/UPDATE/DELETE) and commit the transaction.
-
-        Args:
-            query: The SQL statement to execute.
-            params: Optional tuple of parameters for parameterized queries.
-
-        Returns:
-            A dictionary with keys:
-              - "row_count": int (number of affected rows)
-              - "last_row_id": Optional[int] (for inserts; may be None)
-              - "error": str (only present on failure)
-        """
-        if self.database not in {'mysql', 'mariadb'}:
-            return {'error': f'{self.database} execution adapter is not configured.'}
-
-        conn = None
-        cursor = None
-        try:
-            conn = get_connection()
-            cursor = conn.cursor()
-            cursor.execute(query, params or ())
-            affected = cursor.rowcount
-            last_id = getattr(cursor, "lastrowid", None)
-            # Commit the transaction
+            conn.execute('CREATE TABLE IF NOT EXISTS _querypulse_initialized (version INTEGER)')
+            if not conn.execute('SELECT 1 FROM _querypulse_initialized').fetchone():
+                conn.execute('CREATE TABLE employees (id INTEGER PRIMARY KEY, name TEXT NOT NULL, department TEXT, salary REAL)')
+                conn.executemany('INSERT INTO employees VALUES (?, ?, ?, ?)', [(1, 'Alex', 'Engineering', 85000), (2, 'Sam', 'Design', 72000), (3, 'Taylor', 'Engineering', 92000), (4, 'Jordan', 'Operations', 65000)])
+                conn.execute('INSERT INTO _querypulse_initialized VALUES (1)')
+                conn.commit()
+            deadline = time.monotonic() + 30
+            conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 1000)
+            denied = {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH, sqlite3.SQLITE_PRAGMA}
+            def authorize(action, arg1, arg2, db, trigger):
+                if action in denied or (action == sqlite3.SQLITE_FUNCTION and arg2 == 'load_extension') or arg1 == '_querypulse_initialized':
+                    return sqlite3.SQLITE_DENY
+                return sqlite3.SQLITE_OK
+            conn.set_authorizer(authorize)
+            cursor = conn.execute(query)
+            if cursor.description:
+                columns = [item[0] for item in cursor.description]
+                rows = cursor.fetchmany(1001)
+                result = {'rows': [dict(row) for row in rows[:1000]], 'columns': columns, 'row_count': min(len(rows), 1000), 'truncated': len(rows) > 1000}
+            else:
+                result = {'row_count': max(cursor.rowcount, 0)}
+            cursor.close()
             conn.commit()
-            return {"row_count": affected, "last_row_id": last_id}
-
-        except mysql.connector.Error as exc:
-            # Attempt to rollback on error if possible
-            try:
-                if conn is not None:
-                    conn.rollback()
-            except Exception:
-                pass
-            return {"error": str(exc)}
-
+            return result
         finally:
-            if cursor is not None:
-                try:
-                    cursor.close()
-                except Exception:
-                    pass
-            if conn is not None:
-                try:
-                    close_connection(conn)
-                except Exception:
-                    pass
+            conn.close()

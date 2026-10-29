@@ -1,4 +1,5 @@
-import React from 'react'
+import React, { useState } from 'react'
+import api, { errorMessage } from '../../services/api'
 import { useForm } from 'react-hook-form'
 import { Link } from 'react-router-dom'
 import PrimaryButton from '../../components/ui/PrimaryButton'
@@ -6,8 +7,16 @@ import PrimaryButton from '../../components/ui/PrimaryButton'
 export default function ResetPassword() {
   const { register, handleSubmit, watch, formState: { errors } } = useForm()
 
-  function onSubmit(data) {
-    console.log('Reset password', data)
+  const [message, setMessage] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  async function onSubmit(data) {
+    setSubmitting(true)
+    setMessage('')
+    try {
+      const response = await api.post('/auth/reset-password', { password: data.password, token: new URLSearchParams(window.location.search).get('token') || '' })
+      setMessage(response.data.message)
+    } catch (error) { setMessage(errorMessage(error)) }
+    finally { setSubmitting(false) }
   }
 
   return (
@@ -18,10 +27,12 @@ export default function ResetPassword() {
           <p className="text-[var(--muted)] mt-2">Choose a strong password to keep your account secure.</p>
         </div>
 
+        {message && <p className="mb-5 text-sm" role="status">{message}</p>}
         <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
           <div>
-            <label className="block text-sm font-medium text-[var(--text)]">New password</label>
+            <label htmlFor="new-password" className="block text-sm font-medium text-[var(--text)]">New password</label>
             <input
+              id="new-password"
               type="password"
               {...register('password', { required: 'Password is required', minLength: { value: 8, message: 'Minimum 8 characters' } })}
               className="mt-2 w-full rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3 text-[var(--text)] outline-none transition duration-200 placeholder:text-[var(--muted)] focus:border-[var(--accent)] focus:ring-2 focus:ring-[var(--accent)]/20"
@@ -30,8 +41,9 @@ export default function ResetPassword() {
           </div>
 
           <div>
-            <label className="block text-sm font-medium text-[var(--text)]">Confirm password</label>
+            <label htmlFor="confirm-password" className="block text-sm font-medium text-[var(--text)]">Confirm password</label>
             <input
+              id="confirm-password"
               type="password"
               {...register('confirmPassword', {
                 required: 'Confirm password is required',
@@ -42,7 +54,7 @@ export default function ResetPassword() {
             {errors.confirmPassword && <p className="mt-2 text-xs text-red-400">{errors.confirmPassword.message}</p>}
           </div>
 
-          <PrimaryButton type="submit" className="w-full">Reset password</PrimaryButton>
+          <PrimaryButton disabled={submitting} type="submit" className="w-full">Reset password</PrimaryButton>
         </form>
 
         <div className="mt-8 text-center text-[var(--muted)] text-sm">

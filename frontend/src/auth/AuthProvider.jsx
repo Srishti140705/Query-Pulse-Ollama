@@ -1,61 +1,27 @@
-import React, { createContext, useContext, useState, useCallback } from 'react'
-
+import React, { createContext, useContext, useEffect, useState, useCallback } from 'react'
+import api from '../services/api'
 const AuthContext = createContext(null)
-
-const dummyUser = (email) => ({
-  id: 'user_001',
-  name: 'Jordan Smith',
-  email: email || 'jordan.smith@querypulse.dev',
-  role: 'Admin',
-  joined: 'April 12, 2025',
-})
-
+const normalize = (user) => ({ ...user, name: user.username, joined: user.created_at ? new Date(user.created_at).toLocaleDateString() : '—' })
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null)
-  const [loading, setLoading] = useState(false)
-
-  const login = useCallback(({ email }) => {
-    setLoading(true)
-    window.setTimeout(() => {
-      setUser(dummyUser(email))
-      setLoading(false)
-    }, 400)
-  }, [])
-
-  const register = useCallback(({ name, email }) => {
-    setLoading(true)
-    window.setTimeout(() => {
-      setUser({
-        id: 'user_002',
-        name: name || 'Jordan Smith',
-        email: email || 'jordan.smith@querypulse.dev',
-        role: 'Admin',
-        joined: 'April 12, 2025',
-      })
-      setLoading(false)
-    }, 400)
-  }, [])
-
+  const [loading, setLoading] = useState(true)
   const logout = useCallback(() => {
-    setLoading(true)
-    window.setTimeout(() => {
-      setUser(null)
-      setLoading(false)
-    }, 200)
+    localStorage.removeItem('access_token')
+    localStorage.removeItem('auth_user')
+    setUser(null)
   }, [])
-
-  const value = {
-    user,
-    login,
-    logout,
-    register,
-    loading,
-    isAuthenticated: Boolean(user),
-  }
-
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+  const login = useCallback((value) => {
+    localStorage.setItem('auth_user', JSON.stringify(value))
+    setUser(normalize(value))
+  }, [])
+  useEffect(() => {
+    if (!localStorage.getItem('access_token')) { setLoading(false); return }
+    api.get('/auth/me').then(({ data }) => login(data)).catch(logout).finally(() => setLoading(false))
+  }, [login, logout])
+  useEffect(() => {
+    window.addEventListener('auth-expired', logout)
+    return () => window.removeEventListener('auth-expired', logout)
+  }, [logout])
+  return <AuthContext.Provider value={{ user, login, logout, loading, isAuthenticated: Boolean(user) }}>{children}</AuthContext.Provider>
 }
-
-export function useAuth() {
-  return useContext(AuthContext)
-}
+export function useAuth() { return useContext(AuthContext) }

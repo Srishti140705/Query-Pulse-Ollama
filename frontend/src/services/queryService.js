@@ -1,10 +1,6 @@
-import axios from "axios";
+import API from './api';
 
-const API = axios.create({
-  baseURL: "http://127.0.0.1:8000",
-});
-
-export const executeQuery = async (query, database = "mysql") => {
+export const executeQuery = async (query, database = "sqlite") => {
   const response = await API.post("/query", {
     query,
     database,
@@ -13,7 +9,7 @@ export const executeQuery = async (query, database = "mysql") => {
   return response.data;
 };
 
-export const analyzeQuery = async (query, database = "mysql") => {
+export const analyzeQuery = async (query, database = "sqlite") => {
   const response = await API.post("/analyze", {
     query,
     database,

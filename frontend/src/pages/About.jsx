@@ -7,7 +7,7 @@ export default function About() {
         <p className="font-code text-xs uppercase tracking-[0.28em] text-[var(--accent-soft)]">About</p>
         <h1 className="font-heading mt-3 text-3xl font-semibold text-[var(--text)]">About QueryPulse</h1>
         <p className="mt-4 max-w-3xl text-sm leading-7 text-[var(--muted)]">
-          QueryPulse is a lightweight SQL developer dashboard focused on making it easier to write, analyze, and optimize SQL queries. This UI is a prototype built with React, Vite, and Tailwind CSS.
+          QueryPulse is a lightweight SQL developer dashboard focused on making it easier to write, analyze, and optimize SQL queries. It combines a React editor with a FastAPI backend and a private SQLite workspace for each account.
         </p>
 
         <div className="mt-8 grid gap-4 sm:grid-cols-2">

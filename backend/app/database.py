@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import os
 from typing import Optional
+from urllib.parse import quote_plus
 
 import mysql.connector
+from sqlalchemy import create_engine
 from mysql.connector import Error as MySQLError
 
 
@@ -124,3 +126,20 @@ def close_connection(connection: Optional[mysql.connector.connection.MySQLConnec
             connection.close()
     except MySQLError as exc:
         raise RuntimeError(f"Error closing MySQL connection: {exc}") from exc
+
+
+from functools import lru_cache
+from pathlib import Path
+
+@lru_cache(maxsize=1)
+def get_sqlalchemy_engine():
+    """Use an explicit account DB, existing MySQL settings, or local SQLite."""
+    folder = Path(os.getenv('QUERYPULSE_DATA_DIR', str(Path(__file__).resolve().parent.parent / 'data')))
+    folder.mkdir(parents=True, exist_ok=True)
+    url = os.getenv('AUTH_DATABASE_URL')
+    if not url and os.getenv('MYSQL_HOST'):
+        from sqlalchemy.engine import URL
+        url = URL.create('mysql+mysqlconnector', username=os.getenv('MYSQL_USER'), password=os.getenv('MYSQL_PASSWORD', ''), host=os.getenv('MYSQL_HOST'), port=int(os.getenv('MYSQL_PORT', '3306')), database=os.getenv('MYSQL_DATABASE'))
+    if not url:
+        url = 'sqlite:///' + (folder / 'accounts.db').as_posix()
+    return create_engine(url, pool_pre_ping=True)

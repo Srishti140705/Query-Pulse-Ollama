@@ -11,7 +11,7 @@ export default function Landing() {
         <section className="grid min-h-[calc(100vh-9rem)] gap-10 lg:grid-cols-[1.05fr_0.95fr] lg:items-center">
           <div className="space-y-8 ide-fade-in">
             <div className="inline-flex rounded-xl border border-[var(--border)] bg-[var(--surface)] px-4 py-2 font-code text-xs font-semibold uppercase tracking-[0.28em] text-[var(--accent-soft)]">
-              Built for SQL teams
+              Your personal SQL workspace
             </div>
             <div className="space-y-5">
               <h1 className="font-heading max-w-3xl text-5xl font-semibold tracking-normal text-[var(--text)] sm:text-6xl">
@@ -24,7 +24,7 @@ export default function Landing() {
 
             <div className="flex flex-wrap items-center gap-3">
               <Link to={isAuthenticated ? '/dashboard' : '/register'} className="ide-button-primary h-12 px-6">
-                {isAuthenticated ? 'Continue to workspace' : 'Start a free trial'}
+                {isAuthenticated ? 'Continue to workspace' : 'Create an account'}
               </Link>
               <a href="#features" className="ide-button h-12 px-6">
                 View features
@@ -34,23 +34,23 @@ export default function Landing() {
             <div className="grid items-stretch gap-4 sm:grid-cols-3">
               <FeatureStat label="Auto-save" value="Real-time" />
               <FeatureStat label="History" value="Instant" />
-              <FeatureStat label="Security" value="SSO-ready" />
+              <FeatureStat label="Workspace" value="Private" />
             </div>
           </div>
 
           <div className="ide-card overflow-hidden p-5 ide-fade-in">
             <div className="flex items-center justify-between border-b border-[var(--border)] pb-4">
               <div>
-                <p className="font-code text-xs uppercase tracking-[0.24em] text-[var(--accent-soft)]">Live workspace</p>
+                <p className="font-code text-xs uppercase tracking-[0.24em] text-[var(--accent-soft)]">Workspace preview</p>
                 <p className="font-heading mt-2 text-xl font-semibold">Editor + results</p>
               </div>
-              <span className="rounded-lg bg-emerald-400/10 px-3 py-1 font-code text-xs text-emerald-200">Connected</span>
+              <span className="rounded-lg bg-emerald-400/10 px-3 py-1 font-code text-xs text-emerald-200">Preview</span>
             </div>
 
             <div className="mt-5 overflow-hidden rounded-2xl border border-[var(--border)] bg-[#0A0716]">
               <div className="flex h-10 items-center justify-between border-b border-[var(--border)] bg-[var(--surface)] px-4 font-code text-xs text-[var(--muted)]">
                 <span>analytics.sql</span>
-                <span>MySQL</span>
+                <span>SQLite</span>
               </div>
               <pre className="font-code overflow-hidden p-5 text-sm leading-7 text-[var(--text)]">
 {`SELECT id,

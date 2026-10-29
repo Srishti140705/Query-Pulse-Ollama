@@ -1,7 +1,12 @@
 import React from 'react'
+import { readWorkspace } from '../services/workspaceStorage'
 import { Link } from 'react-router-dom'
 
 export default function Dashboard() {
+  const runs = readWorkspace('runs')
+  const favorites = readWorkspace('favoriteQueries')
+  const successful = runs.filter((run) => run.status === 'Successful')
+  const average = successful.length ? Math.round(successful.reduce((sum, run) => sum + run.executionTime, 0) / successful.length) : 0
   return (
     <div className="mx-auto max-w-[1500px] space-y-6">
       <section className="ide-card ide-fade-in p-6 sm:p-8">
@@ -15,21 +20,21 @@ export default function Dashboard() {
               </div>
               <div className="ide-surface min-w-56 px-5 py-4">
                 <p className="font-code text-xs uppercase tracking-[0.2em] text-[var(--muted)]">Active workspace</p>
-                <div className="font-code mt-3 truncate text-xl font-semibold text-[var(--text)]">analytics_prod</div>
+                <div className="font-code mt-3 truncate text-xl font-semibold text-[var(--text)]">Personal workspace</div>
               </div>
             </div>
 
             <div className="grid items-stretch gap-4 sm:grid-cols-2 xl:grid-cols-4">
-              <MetricCard label="Queries" value="128" />
-              <MetricCard label="Saved" value="24" />
-              <MetricCard label="Alerts" value="3" />
-              <MetricCard label="Team" value="2 users" />
+              <MetricCard label="Queries" value={runs.length} />
+              <MetricCard label="Saved" value={favorites.length} />
+              <MetricCard label="Errors" value={runs.length - successful.length} />
+              <MetricCard label="Successful" value={successful.length} />
             </div>
 
             <div className="grid items-stretch gap-4 lg:grid-cols-3">
-              <InfoCard title="Recent query" value="SELECT name, email FROM users WHERE active = 1" note="Last executed 12 min ago" />
-              <InfoCard title="Performance" value="95%" note="Average query success rate" />
-              <InfoCard title="Storage" value="18.4 GB" note="Used this month" />
+              <InfoCard title="Recent query" value={runs[0]?.query || "No queries yet"} note={runs[0] ? new Date(runs[0].createdAt).toLocaleString() : "Open the editor to get started"} />
+              <InfoCard title="Performance" value={runs.length ? `${Math.round(successful.length / runs.length * 100)}%` : "—"} note="Average query success rate" />
+              <InfoCard title="Average duration" value={`${average} ms`} note="Successful query requests" />
             </div>
           </div>
 

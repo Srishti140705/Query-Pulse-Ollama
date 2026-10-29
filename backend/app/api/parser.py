@@ -20,7 +20,10 @@ class SQLParser:
 
         self._query = query.strip()
         dialect_name = {"postgresql": "postgres", "mariadb": "mysql"}.get(dialect or "", dialect)
-        self._expression = sqlglot.parse_one(self._query, read=dialect_name)
+        statements = [item for item in sqlglot.parse(self._query, read=dialect_name) if item is not None]
+        if len(statements) != 1:
+            raise ValueError("Enter exactly one SQL statement at a time.")
+        self._expression = statements[0]
 
         return {
             "query_type": self.get_query_type(),
@@ -55,7 +58,7 @@ class SQLParser:
         if self._expression is None:
             raise ValueError("No SQL query has been parsed yet.")
 
-        columns = []
+        columns = ["*"] if any(isinstance(item, exp.Star) and isinstance(item.parent, exp.Select) for item in self._expression.find_all(exp.Star)) else []
 
         for column in self._expression.find_all(exp.Column):
             columns.append(column.sql())

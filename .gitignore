@@ -31,3 +31,12 @@ node_modules/
 **/node_modules/
 dist/
 build/
+# Persistent account and workspace databases
+backend/data/
+*.db
+.env.*
+!.env.example
+
+# Local installers and repair snapshots
+DockerDesktopInstaller.exe
+production-repair/
