@@ -136,7 +136,9 @@ def get_sqlalchemy_engine():
     """Use an explicit account DB, existing MySQL settings, or local SQLite."""
     folder = Path(os.getenv('QUERYPULSE_DATA_DIR', str(Path(__file__).resolve().parent.parent / 'data')))
     folder.mkdir(parents=True, exist_ok=True)
-    url = os.getenv('AUTH_DATABASE_URL')
+    url = os.getenv('AUTH_DATABASE_URL') or os.getenv('DATABASE_URL')
+    if isinstance(url, str) and url.startswith(('postgres://', 'postgresql://')):
+        url = 'postgresql+psycopg://' + url.split('://', 1)[1]
     if not url and os.getenv('MYSQL_HOST'):
         from sqlalchemy.engine import URL
         url = URL.create('mysql+mysqlconnector', username=os.getenv('MYSQL_USER'), password=os.getenv('MYSQL_PASSWORD', ''), host=os.getenv('MYSQL_HOST'), port=int(os.getenv('MYSQL_PORT', '3306')), database=os.getenv('MYSQL_DATABASE'))

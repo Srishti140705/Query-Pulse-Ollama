@@ -13,7 +13,8 @@ if str(BACKEND_DIR) not in sys.path:
 # This keeps preview deployments functional; use an external database for
 # production data that must survive function restarts.
 os.environ.setdefault('QUERYPULSE_DATA_DIR', '/tmp/querypulse')
-os.environ.setdefault('AUTH_DATABASE_URL', 'sqlite:////tmp/querypulse/accounts.db')
+if not os.getenv('AUTH_DATABASE_URL'):
+    os.environ['AUTH_DATABASE_URL'] = os.getenv('DATABASE_URL') or 'sqlite:////tmp/querypulse/accounts.db'
 
 from app.main import app
 

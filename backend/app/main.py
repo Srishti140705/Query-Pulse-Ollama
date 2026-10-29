@@ -8,6 +8,7 @@ import re
 import secrets
 import smtplib
 from email.message import EmailMessage
+from functools import lru_cache
 
 import bcrypt
 import jwt
@@ -21,20 +22,42 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.database import get_sqlalchemy_engine
-from app.models import Base, User
+from app.models import AppSetting, Base, User
 from app.api.parser import SQLParser
 from app.api.analyzer import QueryAnalyzer
 from app.api.query_executor import QueryExecutor
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / '.env')
-SECRET = os.getenv('JWT_SECRET_KEY') or secrets.token_urlsafe(48)
-if os.getenv('ENVIRONMENT') == 'production' and not os.getenv('JWT_SECRET_KEY'):
-    raise RuntimeError('Set JWT_SECRET_KEY in production.')
+
+
+def ensure_schema():
+    engine = get_sqlalchemy_engine()
+    Base.metadata.create_all(engine)
+    return engine
+
+
+@lru_cache(maxsize=1)
+def jwt_secret():
+    configured = os.getenv('JWT_SECRET_KEY')
+    if configured:
+        return configured
+    engine = ensure_schema()
+    with Session(engine) as session:
+        setting = session.get(AppSetting, 'jwt_secret')
+        if setting is None:
+            setting = AppSetting(key='jwt_secret', value=secrets.token_urlsafe(48))
+            session.add(setting)
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                setting = session.get(AppSetting, 'jwt_secret')
+        return setting.value
 
 @asynccontextmanager
 async def lifespan(app):
-    Base.metadata.create_all(get_sqlalchemy_engine())
+    ensure_schema()
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -48,11 +71,11 @@ def password_version(user):
     return hashlib.sha256((user.password_hash or '').encode()).hexdigest()
 
 def token_for(user, purpose='access', minutes=60):
-    return jwt.encode({'sub': str(user.id), 'purpose': purpose, 'version': password_version(user), 'exp': datetime.now(timezone.utc) + timedelta(minutes=minutes)}, SECRET, algorithm='HS256')
+    return jwt.encode({'sub': str(user.id), 'purpose': purpose, 'version': password_version(user), 'exp': datetime.now(timezone.utc) + timedelta(minutes=minutes)}, jwt_secret(), algorithm='HS256')
 
 def user_from_token(token, purpose='access'):
     try:
-        payload = jwt.decode(token, SECRET, algorithms=['HS256'])
+        payload = jwt.decode(token, jwt_secret(), algorithms=['HS256'])
         if payload.get('purpose') != purpose:
             raise ValueError()
         with Session(get_sqlalchemy_engine()) as session:
@@ -97,7 +120,7 @@ class RegisterRequest(PasswordRequest):
 
 @app.post('/register', status_code=201)
 def register(request: RegisterRequest):
-    with Session(get_sqlalchemy_engine()) as session:
+    with Session(ensure_schema()) as session:
         if session.scalar(select(User.id).where(User.email == request.email)) is not None:
             raise HTTPException(409, 'Username or email is already registered.')
         user = User(username=request.username, email=request.email, password_hash=bcrypt.hashpw(request.password.encode(), bcrypt.gensalt()).decode())
@@ -116,11 +139,11 @@ class LoginRequest(BaseModel):
 
 @app.post('/login')
 def login(request: LoginRequest):
-    with Session(get_sqlalchemy_engine()) as session:
+    with Session(ensure_schema()) as session:
         user = session.scalar(select(User).where(User.email == request.email.strip().lower()))
         if len(request.password.encode()) > 72 or user is None or not user.password_hash or not bcrypt.checkpw(request.password.encode(), user.password_hash.encode()):
             raise HTTPException(401, 'Invalid email or password.')
-        return {'access_token': token_for(user, minutes=int(os.getenv('JWT_EXPIRE_MINUTES', '60'))), 'token_type': 'bearer', 'user': user_json(user)}
+        return {'access_token': token_for(user, minutes=int(os.getenv('JWT_EXPIRE_MINUTES') or '60')), 'token_type': 'bearer', 'user': user_json(user)}
 
 @app.get('/auth/me')
 def me(user=Depends(current_user)):
