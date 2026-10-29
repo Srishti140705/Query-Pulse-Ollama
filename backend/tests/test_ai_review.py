@@ -1,8 +1,18 @@
+from unittest.mock import patch
+
 import app.main
 from app.api.ai import deterministic_review
+from app.api.ai_service import AIService
 
 
 SCHEMA = "employees(id int, name varchar(100), department varchar(50), salary decimal(10,2)); departments(id int, name varchar(50))"
+
+
+def test_blank_optional_ai_environment_values_use_defaults():
+    with patch.dict("os.environ", {"AI_PROVIDER": "", "AI_TIMEOUT_SECONDS": ""}):
+        service = AIService()
+    assert service.provider == "ollama"
+    assert service.timeout == 60
 
 
 def test_debug_detects_missing_table():

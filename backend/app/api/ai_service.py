@@ -10,8 +10,8 @@ from fastapi import HTTPException
 
 class AIService:
     def __init__(self) -> None:
-        self.provider = os.getenv("AI_PROVIDER", "ollama").lower()
-        self.timeout = int(os.getenv("AI_TIMEOUT_SECONDS", "60"))
+        self.provider = (os.getenv("AI_PROVIDER") or "ollama").lower()
+        self.timeout = int(os.getenv("AI_TIMEOUT_SECONDS") or "60")
 
     def generate_json(self, instruction: str) -> dict:
         if self.provider == "ollama":
