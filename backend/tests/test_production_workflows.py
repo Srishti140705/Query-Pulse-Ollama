@@ -44,6 +44,15 @@ class ProductionWorkflowTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200, response.text)
         return {'Authorization': 'Bearer ' + response.json()['access_token']}, response.json()['user']['id']
 
+    def test_public_ai_review_falls_back_without_backend_session(self):
+        response = self.client.post('/api/ai/explain', json={
+            'sql': 'SELECT id FROM employees WHERE active = 1;',
+            'dialect': 'mysql',
+        })
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(response.json()['provider_available'])
+        self.assertTrue(response.json()['deterministic_review']['valid_syntax'])
+
     def test_vercel_prefix_routes_and_auth(self):
         self.assertEqual(self.client.get('/api/health').status_code, 200)
         self.assertEqual(self.client.get('/health').status_code, 200)

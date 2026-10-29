@@ -7,6 +7,7 @@ from typing import Literal, Optional
 import sqlglot
 from sqlglot import exp
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +21,17 @@ from app.models import AIInteraction, Base
 
 router = APIRouter(prefix="/ai", tags=["ai"])
 Dialect = Literal["mysql", "postgresql", "sqlite", "mariadb"]
+optional_security = HTTPBearer(auto_error=False)
+
+
+def optional_ai_user(credentials: Optional[HTTPAuthorizationCredentials] = Depends(optional_security)) -> Optional[dict]:
+    """Use account context when available, but keep the public demo review usable."""
+    if credentials is None:
+        return None
+    try:
+        return get_current_user(credentials)
+    except HTTPException:
+        return None
 
 
 def owner_id(current_user: dict) -> int:
@@ -251,19 +263,25 @@ class ConvertRequest(SqlRequest): target_dialect: Dialect
 class FeedbackRequest(BaseModel): feedback: Literal["helpful", "not_helpful"]
 
 
-def ai_result(action: str, input_text: str, dialect: str, current_user: dict, task: str, extra: str = "") -> tuple[dict, dict]:
-    user_id = owner_id(current_user)
-    schema = active_schema_context(user_id)
+def ai_result(action: str, input_text: str, dialect: str, current_user: Optional[dict], task: str, extra: str = "") -> tuple[dict, dict]:
+    user_id = owner_id(current_user) if current_user else None
+    schema = active_schema_context(user_id) if user_id is not None else "Schema context is unavailable. Do not invent tables or columns."
     review = deterministic_review(input_text, dialect, schema)
     grounded_extra = f"{extra}\nDeterministic SQL review (must not be contradicted): {json.dumps(review)}"
-    try:
-        result = prompt_json(task, input_text, dialect, schema, grounded_extra)
-        result["provider_available"] = True
-    except HTTPException as exc:
+    if current_user is None:
         result = {
             "provider_available": False,
-            "provider_warning": str(exc.detail),
+            "provider_warning": "AI provider access requires a valid backend session. Deterministic SQL review is available in this hosted demo.",
         }
+    else:
+        try:
+            result = prompt_json(task, input_text, dialect, schema, grounded_extra)
+            result["provider_available"] = True
+        except HTTPException as exc:
+            result = {
+                "provider_available": False,
+                "provider_warning": str(exc.detail),
+            }
     result["safety_warnings"] = safety_checks(input_text, dialect)
     result["validation"] = validate_suggestion(result, dialect)
     result["deterministic_review"] = review
@@ -271,12 +289,19 @@ def ai_result(action: str, input_text: str, dialect: str, current_user: dict, ta
 
 
 def finish_interaction(action: str, input_text: str, context: dict, result: dict) -> dict:
-    result["interaction_id"] = save_interaction(context["user_id"], action, input_text, result)
+    if context["user_id"] is None:
+        result["interaction_id"] = None
+        return result
+    try:
+        result["interaction_id"] = save_interaction(context["user_id"], action, input_text, result)
+    except Exception:
+        result["interaction_id"] = None
+        result["persistence_warning"] = "The review completed, but its history could not be saved."
     return result
 
 
 @router.post("/explain")
-def explain_sql(request: SqlRequest, current_user: dict = Depends(get_current_user)):
+def explain_sql(request: SqlRequest, current_user: Optional[dict] = Depends(optional_ai_user)):
     sql = require_sql(request.sql)
     result, context = ai_result("explain", sql, request.dialect, current_user, "Explain exactly what this query does in clear developer-friendly language. If deterministic review reports an issue, lead with it. Include keys: explanation, tables (array), joins (array), filters (array), grouping, sorting, likely_result.")
     review = context["review"]
@@ -292,7 +317,7 @@ def explain_sql(request: SqlRequest, current_user: dict = Depends(get_current_us
     return finish_interaction("explain", sql, context, result)
 
 @router.post("/optimize")
-def optimize_sql(request: SqlRequest, current_user: dict = Depends(get_current_user)):
+def optimize_sql(request: SqlRequest, current_user: Optional[dict] = Depends(optional_ai_user)):
     sql = require_sql(request.sql)
     result, context = ai_result("optimize", sql, request.dialect, current_user, "Optimize this query only when there is a defensible improvement. Preserve semantics and never invent schema details. Include keys: can_optimize (boolean), summary, optimized_sql, changes (array), note.")
     review = context["review"]
@@ -315,12 +340,12 @@ def optimize_sql(request: SqlRequest, current_user: dict = Depends(get_current_u
     return finish_interaction("optimize", sql, context, result)
 
 @router.post("/generate")
-def generate_sql(request: GenerateRequest, current_user: dict = Depends(get_current_user)):
+def generate_sql(request: GenerateRequest, current_user: Optional[dict] = Depends(optional_ai_user)):
     result, context = ai_result("generate", request.prompt.strip(), request.dialect, current_user, "Generate SQL from this natural-language request. Include keys: generated_sql, explanation, assumptions (array).", "This is a natural-language request, not existing SQL.")
     return finish_interaction("generate", request.prompt.strip(), context, result)
 
 @router.post("/debug")
-def debug_sql(request: DebugRequest, current_user: dict = Depends(get_current_user)):
+def debug_sql(request: DebugRequest, current_user: Optional[dict] = Depends(optional_ai_user)):
     sql = require_sql(request.sql)
     result, context = ai_result("debug", sql, request.dialect, current_user, "Diagnose correctness, schema, logic, and safety issues. Never say there are no bugs when deterministic review or the database error reports one. Include keys: has_issues (boolean), problem, explanation, corrected_sql, suggestions (array).", f"Database error message: {request.error_message or 'Not supplied'}")
     review = context["review"]
@@ -350,11 +375,12 @@ def debug_sql(request: DebugRequest, current_user: dict = Depends(get_current_us
     return finish_interaction("debug", sql, context, result)
 
 @router.post("/convert")
-def convert_sql(request: ConvertRequest, current_user: dict = Depends(get_current_user)):
+def convert_sql(request: ConvertRequest, current_user: Optional[dict] = Depends(optional_ai_user)):
     sql = require_sql(request.sql); source = "postgres" if request.dialect == "postgresql" else request.dialect; target = "postgres" if request.target_dialect == "postgresql" else request.target_dialect
     try:
         result = {"converted_sql": sqlglot.transpile(sql, read=source, write=target)[0], "explanation": f"Converted from {request.dialect} to {request.target_dialect} using sqlglot.", "used_ai": False}
-        result["safety_warnings"] = safety_checks(sql, request.dialect); result["validation"] = validate_suggestion(result, request.target_dialect); result["interaction_id"] = save_interaction(owner_id(current_user), "convert", sql, result)
+        result["safety_warnings"] = safety_checks(sql, request.dialect); result["validation"] = validate_suggestion(result, request.target_dialect)
+        result["interaction_id"] = save_interaction(owner_id(current_user), "convert", sql, result) if current_user else None
         return result
     except Exception:
         result, context = ai_result("convert", sql, request.target_dialect, current_user, "Convert this SQL to the requested target dialect. Include keys: converted_sql, explanation.", f"Source dialect: {request.dialect}; target dialect: {request.target_dialect}")
