@@ -13,6 +13,7 @@ import { BarChart, Bar, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis
 import { analyzeQuery, executeQuery, getExecutionPlan } from '../services/queryService'
 import { listConnections } from '../services/connectionService'
 import { listWorkspaceQueries } from '../services/workspaceService'
+import { debugSql, explainSql, optimizeSql } from '../services/aiService'
 
 const starterSql = `SELECT
   department,
@@ -59,6 +60,7 @@ export default function QuestWorkspace() {
   const [dialect, setDialect] = useState('mysql')
   const [executionPlan, setExecutionPlan] = useState({ loading: false, data: null, error: '' })
   const [staticAnalysis, setStaticAnalysis] = useState({ loading: false, data: null, error: '' })
+  const [aiReview, setAiReview] = useState({ loading: false, action: '', data: null, error: '' })
   const [historyTop, setHistoryTop] = useState(394)
   const [historyMinHeight, setHistoryMinHeight] = useState(385)
   const editorPanelRef = useRef(null)
@@ -90,6 +92,36 @@ export default function QuestWorkspace() {
     setExecutionPlan({ loading: false, data: null, error: '' })
     setStaticAnalysis({ loading: false, data: null, error: '' })
     setLastExecutionError('')
+    setAiReview({ loading: false, action: '', data: null, error: '' })
+  }
+
+  async function runAiReview(action) {
+    if (!sql.trim()) {
+      setAiReview({ loading: false, action, data: null, error: 'Enter SQL before asking the AI Companion.' })
+      return
+    }
+    setAiReview({ loading: true, action, data: null, error: '' })
+    try {
+      let response
+      if (action === 'explain') response = await explainSql(sql, dialect)
+      if (action === 'optimize') response = await optimizeSql(sql, dialect)
+      if (action === 'debug') response = await debugSql(sql, lastExecutionError, dialect)
+      setAiReview({ loading: false, action, data: response.data, error: '' })
+      setNotice(`AI ${action} review completed`)
+    } catch (error) {
+      const failure = handleRequestError(error, 'AI Companion request failed')
+      if (failure.sessionExpired) return
+      setAiReview({ loading: false, action, data: null, error: failure.message })
+      setNotice(failure.message)
+    }
+  }
+
+  function insertAiSuggestion() {
+    const data = aiReview.data || {}
+    const suggestion = data.optimized_sql || data.corrected_sql || data.generated_sql || data.converted_sql
+    if (!suggestion) return
+    setSql(suggestion)
+    setNotice('AI suggestion inserted. Review it before running.')
   }
 
   function addTab() {
@@ -312,10 +344,22 @@ export default function QuestWorkspace() {
         </aside>
 
         <section ref={companionPanelRef} className="quest-panel companion-panel">
-          <header><h2>♟ AI Companion</h2></header>
+          <header><h2>♟ AI Companion</h2><div className="ai-actions"><button type="button" onClick={() => runAiReview('explain')} disabled={aiReview.loading}>Explain</button><button type="button" onClick={() => runAiReview('optimize')} disabled={aiReview.loading}>Optimize</button><button type="button" onClick={() => runAiReview('debug')} disabled={aiReview.loading}>Debug</button></div></header>
           <div className="companion-body">
-            <div className="robot-mini" aria-hidden="true" />
-            <div className="ai-conversation"><h3>Feature coming soon</h3><p>AI explanations, debugging, and optimization are coming soon.</p></div>
+            <div className={`robot-mini ${aiReview.loading ? 'thinking' : ''}`} aria-hidden="true" />
+            <div className="ai-conversation">
+              {!aiReview.loading && !aiReview.data && !aiReview.error && <div className="ai-answer"><h3>Ollama SQL assistant</h3><p>Choose Explain, Optimize, or Debug to review the SQL currently in the editor.</p></div>}
+              {aiReview.loading && <div className="ai-thinking"><div className="thinking-dots"><i /><i /><i /></div><h3>Reviewing your SQL</h3><p>QueryPulse is combining deterministic checks with the configured AI provider.</p></div>}
+              {aiReview.error && <div className="ai-answer warning"><h3>AI Companion unavailable</h3><p>{aiReview.error}</p></div>}
+              {aiReview.data && <div className={`ai-answer ${aiReview.data.provider_available ? 'success' : 'warning'}`}>
+                <h3>{aiReview.action.charAt(0).toUpperCase() + aiReview.action.slice(1)} review</h3>
+                <p>{aiReview.data.explanation || aiReview.data.summary || aiReview.data.problem || aiReview.data.deterministic_review?.operation_summary || 'The review completed successfully.'}</p>
+                {aiReview.data.provider_warning && <section><h4>Provider status</h4><p>{aiReview.data.provider_warning} Deterministic SQL checks are still shown below.</p></section>}
+                {(aiReview.data.issues?.length > 0 || aiReview.data.deterministic_review?.issues?.length > 0) && <section><h4>Issues</h4><ul>{(aiReview.data.issues || aiReview.data.deterministic_review?.issues || []).map((item, index) => <li key={`${item.message || item}-${index}`}>{item.message || item}</li>)}</ul></section>}
+                {(aiReview.data.changes?.length > 0 || aiReview.data.suggestions?.length > 0 || aiReview.data.deterministic_review?.optimizations?.length > 0) && <section><h4>Recommendations</h4><ul>{(aiReview.data.changes || aiReview.data.suggestions || aiReview.data.deterministic_review?.optimizations || []).map((item, index) => <li key={`${item}-${index}`}>{item}</li>)}</ul></section>}
+                {(aiReview.data.optimized_sql || aiReview.data.corrected_sql || aiReview.data.generated_sql || aiReview.data.converted_sql) && <section><h4>Suggested SQL</h4><pre>{aiReview.data.optimized_sql || aiReview.data.corrected_sql || aiReview.data.generated_sql || aiReview.data.converted_sql}</pre><button type="button" className="ai-insert" onClick={insertAiSuggestion}>Insert into editor</button></section>}
+              </div>}
+            </div>
           </div>
         </section>
       </section>
