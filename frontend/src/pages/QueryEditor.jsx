@@ -41,7 +41,7 @@ export default function QueryEditor() {
     setAiAdvice(null)
     try {
       const { data } = await api.post('/ai/explain', { query: sql, database }, { timeout: 130000 })
-      setAiAdvice({ text: data.explanation, model: data.model })
+      setAiAdvice({ text: data.explanation, model: data.model, fallback: data.provider_available === false, warning: data.provider_warning })
     } catch (error) {
       setAiAdvice({ text: errorMessage(error), error: true })
     } finally {
@@ -356,8 +356,9 @@ const COLORS = [
           </div>
 
           {aiAdvice && <div role={aiAdvice.error ? 'alert' : 'status'} className="mt-5 rounded-xl border border-[var(--border)] p-4">
-            <p className="mb-2 font-semibold">{aiAdvice.error ? 'Ollama unavailable' : `Ollama · ${aiAdvice.model}`}</p>
+            <p className="mb-2 font-semibold">{aiAdvice.error ? 'AI review unavailable' : aiAdvice.fallback ? 'Hosted static review' : `Ollama · ${aiAdvice.model}`}</p>
             <p className="whitespace-pre-wrap text-sm">{aiAdvice.text}</p>
+            {aiAdvice.warning && <p className="mt-3 text-xs text-amber-200">{aiAdvice.warning}</p>}
             {!aiAdvice.error && <p className="mt-3 text-xs text-[var(--muted)]">AI advice may be inaccurate. Review suggestions before running SQL.</p>}
           </div>}
           <div className="relative mt-6">

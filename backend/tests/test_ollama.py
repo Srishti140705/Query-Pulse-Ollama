@@ -12,6 +12,14 @@ from fastapi import HTTPException
 
 
 class OllamaTests(unittest.TestCase):
+    @patch.dict('os.environ', {'VERCEL': '1', 'OLLAMA_BASE_URL': 'http://127.0.0.1:11434'})
+    @patch('app.api.ollama.urlopen')
+    def test_vercel_uses_static_fallback_without_calling_localhost(self, call):
+        result = explain_sql('SELECT * FROM employees', 'sqlite')
+        self.assertFalse(result['provider_available'])
+        self.assertIn('Quality score:', result['explanation'])
+        call.assert_not_called()
+
     @patch('app.api.ollama.urlopen')
     def test_explanation_and_nonstreaming_request(self, call):
         call.return_value.__enter__.return_value = io.StringIO('{"message":{"content":"Reads rows."}}')
